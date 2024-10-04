@@ -28,7 +28,17 @@ parser.add_argument(
 )
 
 parser.add_argument(
-    "--checkpoint", type=str, default=None, help="Specify .pth file to use as a training checkpoint (for evaluation)"
+    "--checkpoint",
+    type=str,
+    default=None,
+    help="Specify .pth file to use as a training checkpoint (for evaluation)",
+)
+
+parser.add_argument(
+    "--hybrid",
+    action="store_true",
+    default=False,
+    help="Adjusts logging + other func. to align with hybrid trainer approach)",
 )
 
 parser.add_argument(
@@ -104,6 +114,8 @@ ANT_ES_TRAINER_CONFIG = {
 # end configs
 
 DETERMINISTIC_ES = True
+
+USE_MLP = True
 
 
 def reparameterised_act(self, inputs, role):
@@ -244,25 +256,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: dict):
     except KeyError:
         pass
 
-    # we do not want a lazy value layer in our model as this ruins some ES functionality
-    # obtain correct policy class based on skrl configs
-    policy = shared_model(
-        observation_space=skrl_env.observation_space,
-        action_space=skrl_env.action_space,
-        device=skrl_env.device,
-        structure=None,
-        roles=["policy", "value"],
-        parameters=[
-            process_cfg(agent_cfg["models"]["policy"]),
-            process_cfg(agent_cfg["models"]["value"]),
-        ],
-    )
+    if not args_cli.hybrid:
+        # obtain correct policy class based on skrl configs
+        policy = shared_model(
+            observation_space=skrl_env.observation_space,
+            action_space=skrl_env.action_space,
+            device=skrl_env.device,
+            structure=None,
+            roles=["policy", "value"],
+            parameters=[
+                process_cfg(agent_cfg["models"]["policy"]),
+                process_cfg(agent_cfg["models"]["value"]),
+            ],
+        )
 
-    initialise_lazy_linear(policy, policy.observation_space.shape)
+        # we do not want a lazy value layer in our model as this ruins some ES functionality
+        initialise_lazy_linear(policy, policy.observation_space.shape)
 
-    # we will now monkey-patch the policy to implement the reparametrisation trick
-    # this allows the forward call to the policy to be differentiable and thus vectorisable
-    apply_reparameterisation_patch(policy)
+        # we will now monkey-patch the policy to implement the reparametrisation trick
+        # this allows the forward call to the policy to be differentiable and thus vectorisable
+        apply_reparameterisation_patch(policy)
+    else:  # this is used for direct ES training / non-hybrid
+        from models import MLP
+
+        policy = MLP(
+            observation_space=skrl_env.observation_space,
+            action_space=skrl_env.action_space,
+            device=skrl_env.device,
+        )
 
     # determine custom trainer config
     task_name = args_cli.task.split("-")[1].upper()
@@ -290,8 +311,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: dict):
     log_dir = "logs/custom/" + task_name.lower()
     trainer_config["logdir"] = log_dir
 
+    # add hybrid flag into trainer config
+    trainer_config["hybrid"] = True if args_cli.hybrid is True else False
+
     # pass into trainer
-    trainer = DirectESTrainer(cfg=trainer_config, env=env, policy=policy)
+    trainer = DirectESTrainer(cfg=trainer_config, env=skrl_env, policy=policy)
 
     # check if we should test
     if args_cli.test:

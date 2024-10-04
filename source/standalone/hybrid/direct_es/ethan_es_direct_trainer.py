@@ -43,22 +43,24 @@ class DirectESTrainer(object):
         self.mu = torch.zeros(self.num_params, device=self.device)
 
         # set antithetic to true if provided in config
-        self.antithetic = bool(cfg["antithetic"])
+        self.antithetic = cfg["antithetic"]
 
         # obtain checkpoint if provided in config
-        self.checkpoint = cfg.get("checkpoint")
+        self.checkpoint = cfg["checkpoint"]
 
         # set hybrid to True if checkpoint is provided
-        self.hybrid = bool(self.checkpoint)
+        self.hybrid = cfg.get("hybrid", False)
 
         endstring = "_hybrid_torch" if self.hybrid else "_es_torch"
 
+        self.log_dir = os.path.join(cfg["logdir"], time.strftime("%Y-%m-%d_%H-%M-%S") + endstring)
+
         # initiate writer + save functionality
-        self.writer = SummaryWriter(log_dir=os.path.join(cfg["logdir"], time.strftime("%Y-%m-%d_%H-%M-%S") + endstring))
+        self.writer = SummaryWriter(log_dir=self.log_dir)
         self.write_interval = cfg.get("write_interval", 20)
 
         self.save_interval = cfg.get("save_interval", 20)
-        self.save_dir = os.path.join(cfg["logdir"], "checkpoints")
+        self.save_dir = os.path.join(self.log_dir, "checkpoints")
         os.makedirs(self.save_dir, exist_ok=True)
 
         self.tracking_data = {}
@@ -131,8 +133,8 @@ class DirectESTrainer(object):
         episode_lengths = torch.zeros(self.npop, dtype=torch.long, device=self.device)
         steps_taken = 0
 
-        # states, _ = self.env.reset()
-        states = self.env.reset()[0]["policy"]
+        states, _ = self.env.reset()
+        # states = self.env.reset()[0]["policy"]
 
         params = self._reshape_params()
 
@@ -160,8 +162,8 @@ class DirectESTrainer(object):
             # iterate steps taken
             steps_taken += 1
 
-            states = next_states["policy"]
-            # states = next_states
+            # states = next_states["policy"]
+            states = next_states
 
         self.env.reset()
 
