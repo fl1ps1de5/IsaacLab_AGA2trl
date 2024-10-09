@@ -74,6 +74,7 @@ from functools import partial
 import copy
 
 from skrl.utils.model_instantiators.torch import shared_model
+from skrl.resources.preprocessors.torch.running_standard_scaler import RunningStandardScaler
 
 from omni.isaac.lab.envs import (
     ManagerBasedRLEnvCfg,
@@ -87,10 +88,72 @@ from ethan_es_direct_trainer import DirectESTrainer
 
 # begin configs
 # define traininer configs - will be moved outside of this file
-CARTPOLE_ES_TRAINER_CONFIG = {
+CARTPOLE_ES_TRAINER_CONFIG_MLP = {
     "num_generations": 100,
+    "max_timesteps": None,
     "max_episode_length": 500,
-    "sigma": 0.05,
+    "sigma": 0.1,
+    "sigma_decay": 0.999,
+    "sigma_limit": 0.01,
+    "alpha": 0.1,
+    "alpha_decay": 0.9999,
+    "alpha_limit": 0.001,
+    "checkpoint": None,
+    "antithetic": False,
+}
+
+CARTPOLE_ES_TRAINER_CONFIG_SHARED = {
+    "num_generations": 100,
+    "max_timesteps": 2100,
+    "max_episode_length": 500,
+    "sigma": 0.01,
+    "sigma_decay": 1,
+    "sigma_limit": 0.01,
+    "alpha": 0.01,
+    "alpha_decay": 1,
+    "alpha_limit": 0.001,
+    "checkpoint": None,
+    "antithetic": True,
+    "state_preprocessor": None,
+    "state_preprocessor_kwargs": None,
+    "rewards_shaper_scale": 1.0,
+}
+
+ANT_ES_TRAINER_CONFIG_MLP = {
+    "num_generations": 500,
+    "max_episode_length": 1000,
+    "sigma": 0.1,
+    "sigma_decay": 0.999,
+    "sigma_limit": 0.01,
+    "alpha": 0.1,
+    "alpha_decay": 0.9999,
+    "alpha_limit": 0.001,
+    "checkpoint": None,
+    "antithetic": False,
+}
+
+ANT_ES_TRAINER_CONFIG_SHARED = {
+    "num_generations": 500,
+    # "max_timesteps": None,
+    "max_episode_length": 1000,
+    "sigma": 0.03,
+    "sigma_decay": 1,
+    "sigma_limit": 0.01,
+    "alpha": 0.05,
+    "alpha_decay": 1,
+    "alpha_limit": 0.001,
+    "checkpoint": None,
+    "antithetic": False,
+    "state_preprocessor": RunningStandardScaler,
+    "state_preprocessor_kwargs": None,
+    "rewards_shaper_scale": 0.6,
+}
+
+REACH_ES_TRAINER_CONFIG_SHARED = {
+    "num_generations": 500,
+    # "max_timesteps": None,
+    "max_episode_length": 1000,
+    "sigma": 0.1,
     "sigma_decay": 1,
     "sigma_limit": 0.01,
     "alpha": 0.05,
@@ -98,24 +161,12 @@ CARTPOLE_ES_TRAINER_CONFIG = {
     "alpha_limit": 0.001,
     "checkpoint": None,
     "antithetic": True,
-}
-
-ANT_ES_TRAINER_CONFIG = {
-    "num_generations": 500,
-    "max_episode_length": 1000,
-    "sigma": 0.1,
-    "sigma_decay": 0.999,
-    "sigma_limit": 0.01,
-    "alpha": 0.01,
-    "alpha_decay": 0.999,
-    "alpha_limit": 0.001,
-    "checkpoint": None,
+    "state_preprocessor": RunningStandardScaler,
+    "rewards_shaper_scale": 1.0,
 }
 # end configs
 
-DETERMINISTIC_ES = True
-
-USE_MLP = True
+DETERMINISTIC_ES = False
 
 
 def reparameterised_act(self, inputs, role):
@@ -164,7 +215,8 @@ def remove_reparameterisation_patch(model):
         del model._original_act
 
 
-# process config taken from skrl runner
+# process config - taken from skrl runner
+# modified to only require elements needed for ES
 def process_cfg(cfg: dict) -> dict:
     """Convert simple types to skrl classes/components
 
@@ -173,10 +225,8 @@ def process_cfg(cfg: dict) -> dict:
     :return: Updated dictionary
     """
     _direct_eval = [
-        "learning_rate_scheduler",
-        "shared_state_preprocessor",
+        # "learning_rate_scheduler",
         "state_preprocessor",
-        "value_preprocessor",
     ]
 
     def reward_shaper_function(scale):
@@ -220,12 +270,10 @@ def initialise_lazy_linear(module, input_shape):
         else:
             # recursively initialise nested modules
             initialise_lazy_linear(child, input_shape)
-    # print model to check
-    print(module)
 
 
 @hydra_task_config(args_cli.task, "skrl_cfg_entry_point")
-def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: dict):
+def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
 
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
@@ -233,12 +281,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: dict):
 
     # max iterations for training
     if args_cli.max_iterations:
-        agent_cfg["trainer"]["timesteps"] = args_cli.max_iterations * agent_cfg["agent"]["rollouts"]
-    agent_cfg["trainer"]["close_environment_at_exit"] = False
+        cfg["trainer"]["timesteps"] = args_cli.max_iterations * cfg["agent"]["rollouts"]
+    cfg["trainer"]["close_environment_at_exit"] = False
 
     # set the environment seed
     # note: certain randomization occur in the environment initialization so we set the seed here
-    env_cfg.seed = args_cli.seed if args_cli.seed is not None else agent_cfg["seed"]
+    env_cfg.seed = args_cli.seed if args_cli.seed is not None else cfg["seed"]
 
     # create environment
     env = gym.make(args_cli.task, cfg=env_cfg, is_finite_horizon=False)
@@ -248,15 +296,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: dict):
 
     # remove 'class' key from cfg["models"]["policy"] and cfg["models"]["value"]
     try:
-        del agent_cfg["models"]["policy"]["class"]
+        del cfg["models"]["policy"]["class"]
     except KeyError:
         pass
     try:
-        del agent_cfg["models"]["value"]["class"]
+        del cfg["models"]["value"]["class"]
     except KeyError:
         pass
 
-    if not args_cli.hybrid:
+    if args_cli.hybrid:
         # obtain correct policy class based on skrl configs
         policy = shared_model(
             observation_space=skrl_env.observation_space,
@@ -265,8 +313,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: dict):
             structure=None,
             roles=["policy", "value"],
             parameters=[
-                process_cfg(agent_cfg["models"]["policy"]),
-                process_cfg(agent_cfg["models"]["value"]),
+                process_cfg(cfg["models"]["policy"]),
+                process_cfg(cfg["models"]["value"]),
             ],
         )
 
@@ -276,6 +324,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: dict):
         # we will now monkey-patch the policy to implement the reparametrisation trick
         # this allows the forward call to the policy to be differentiable and thus vectorisable
         apply_reparameterisation_patch(policy)
+
     else:  # this is used for direct ES training / non-hybrid
         from models import MLP
 
@@ -288,8 +337,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: dict):
     # determine custom trainer config
     task_name = args_cli.task.split("-")[1].upper()
 
+    # obtain config based on policy
+    config_policy = "SHARED" if args_cli.hybrid else "MLP"
+
     # obtain trainer config
-    config_name = f"{task_name}_ES_TRAINER_CONFIG"
+    config_name = f"{task_name}_ES_TRAINER_CONFIG_{config_policy}"
 
     # load the trainer config based on task name
     try:
@@ -311,11 +363,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: dict):
     log_dir = "logs/custom/" + task_name.lower()
     trainer_config["logdir"] = log_dir
 
-    # add hybrid flag into trainer config
-    trainer_config["hybrid"] = True if args_cli.hybrid is True else False
+    # add hybrid flag into trainer config based on cli
+    trainer_config["hybrid"] = True if args_cli.hybrid else False
+
+    # add reward shaper into trainer config (defined through preprocessing)
+    agent_cfg = cfg["agent"].copy()
+    agent_cfg["rewards_shaper"] = None  # to avoid dictionary changed size during preprocess
+    agent_cfg.update(process_cfg(agent_cfg))
+    trainer_config["rewards_shaper"] = agent_cfg["rewards_shaper"]
 
     # pass into trainer
     trainer = DirectESTrainer(cfg=trainer_config, env=skrl_env, policy=policy)
+
+    # pre-experiment outputs
+    print("\n" * 3, "========================" + "\n")
+    print("Training policy with following structure: ")
+    print(policy)
+    print(f"Policy training to complete {task_name} task")
+    print(f"Training policy with config: '{config_name}'")
+    print(f"{trainer_config}\n")
 
     # check if we should test
     if args_cli.test:

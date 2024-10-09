@@ -1,8 +1,12 @@
 import torch
 from torch.utils.tensorboard.writer import SummaryWriter
 from torch import vmap
-from torch.func import functional_call  # type: ignore
+from torch._functorch.functional_call import functional_call
 from torch.nn.utils import vector_to_parameters, parameters_to_vector
+from utils.traininglogger import TrainingLogger
+from utils.adam import Adam
+from utils import utils
+
 import numpy as np
 import time
 import copy
@@ -28,40 +32,61 @@ class DirectESTrainer(object):
         self.model_arch = self._get_model_arch()
         self.num_params = self._get_num_params()
 
-        self.num_gens = cfg["num_generations"]
-        self.max_episode_length = cfg["max_episode_length"]
+        self.num_gens = self.cfg["num_generations"]
+        self.max_episode_length = self.cfg["max_episode_length"]  # not implemented
+        self.max_timesteps = self.cfg.get("max_timesteps", None)
 
-        self.sigma = cfg["sigma"]
-        self.alpha = cfg["alpha"]
-        self.sigma_decay = cfg["sigma_decay"]
-        self.alpha_decay = cfg["alpha_decay"]
-        self.sigma_limit = cfg["sigma_limit"]
-        self.alpha_limit = cfg["alpha_limit"]
+        self.sigma = self.cfg["sigma"]
+        self.alpha = self.cfg["alpha"]
+        self.sigma_decay = self.cfg["sigma_decay"]
+        self.alpha_decay = self.cfg["alpha_decay"]
+        self.sigma_limit = self.cfg["sigma_limit"]
+        self.alpha_limit = self.cfg["alpha_limit"]
 
         self.npop = env.num_envs
 
         self.mu = torch.zeros(self.num_params, device=self.device)
 
+        # adam optimiser
+        self.optimiser = Adam(self, self.alpha)
+
         # set antithetic to true if provided in config
-        self.antithetic = cfg["antithetic"]
+        self.antithetic = self.cfg["antithetic"]
 
         # obtain checkpoint if provided in config
-        self.checkpoint = cfg["checkpoint"]
+        self.checkpoint = self.cfg["checkpoint"]
 
         # set hybrid to True if checkpoint is provided
-        self.hybrid = cfg.get("hybrid", False)
+        self.hybrid = self.cfg.get("hybrid", False)
 
         endstring = "_hybrid_torch" if self.hybrid else "_es_torch"
 
-        self.log_dir = os.path.join(cfg["logdir"], time.strftime("%Y-%m-%d_%H-%M-%S") + endstring)
+        self.log_dir = os.path.join(self.cfg["logdir"], time.strftime("%Y-%m-%d_%H-%M-%S") + endstring)
 
         # initiate writer + save functionality
         self.writer = SummaryWriter(log_dir=self.log_dir)
-        self.write_interval = cfg.get("write_interval", 20)
+        self.write_interval = self.cfg.get("write_interval", 20)  # write information every x timesteps/gens
 
-        self.save_interval = cfg.get("save_interval", 20)
+        self.save_interval = self.cfg.get("save_interval", 5)  # save model every x generations
         self.save_dir = os.path.join(self.log_dir, "checkpoints")
         os.makedirs(self.save_dir, exist_ok=True)
+
+        self.logger = TrainingLogger(log_dir=self.log_dir)
+
+        self.logger.log_setup(
+            num_envs=self.npop,
+            num_gens=self.num_gens,
+            max_timesteps=self.max_timesteps,
+            sigma=self.sigma,
+            sigma_decay=self.sigma_decay,
+            sigma_limit=self.sigma_limit,
+            learning_rate=self.alpha,
+            learning_rate_limit=self.alpha_limit,
+            learning_rate_decay=self.alpha_decay,
+            checkpoint=self.checkpoint,
+            policy=self.policy,
+            optimizer=("Adam" if self.optimiser is not None else "None"),
+        )
 
         self.tracking_data = {}
         self.total_timesteps = 0
@@ -69,6 +94,16 @@ class DirectESTrainer(object):
         # track best values
         self.best_mu = None
         self.best_reward = float("-inf")
+
+        # initalise preprocessor if required
+        self.state_preprocessor = self.cfg.get("state_preprocessor", None)
+        if self.state_preprocessor:
+            self.state_preprocessor = self.state_preprocessor(size=self.env.observation_space, device=self.device)
+        else:
+            self.state_preprocessor = utils.empty_preprocessor
+
+        # initalise reward shaper (defined in config)
+        self.reward_shaper = self.cfg["rewards_shaper"]
 
     def _get_w(self):
         return parameters_to_vector(self.policy.parameters())
@@ -131,18 +166,21 @@ class DirectESTrainer(object):
         all_dones = torch.zeros(self.npop, dtype=torch.bool, device=self.device)
         sum_rewards = torch.zeros(self.npop).to(self.device)
         episode_lengths = torch.zeros(self.npop, dtype=torch.long, device=self.device)
-        steps_taken = 0
 
         states, _ = self.env.reset()
-        # states = self.env.reset()[0]["policy"]
 
+        # reshape population params in order to be vectorised
         params = self._reshape_params()
 
         while not all_dones.all():  # and (episode_lengths <= self.max_episode_length).any()
 
-            actions = self._obtain_parallel_actions(states=states, params=params, base_model=self.model_arch)
+            actions = self._obtain_parallel_actions(
+                states=self.state_preprocessor(states), params=params, base_model=self.model_arch
+            )
 
             next_states, rewards, terminated, truncated, infos = self.env.step(actions)
+            rewards = self.reward_shaper(rewards)
+            self.total_timesteps += 1
 
             dones = torch.bitwise_or(terminated, truncated)
             all_dones = torch.bitwise_or(all_dones, dones.squeeze())
@@ -150,30 +188,23 @@ class DirectESTrainer(object):
             # track non done envs
             active_envs = ~all_dones
 
-            # sum reward for non-done envs
-            sum_rewards[active_envs] += rewards.squeeze()[active_envs]
-
             # sum reward for all envs
-            # sum_rewards += rewards
+            sum_rewards += rewards.squeeze()
 
             # iterate episode length for non done envs
             episode_lengths[active_envs] += 1
 
-            # iterate steps taken
-            steps_taken += 1
-
-            # states = next_states["policy"]
             states = next_states
 
-        self.env.reset()
-
-        return sum_rewards, steps_taken
+        return sum_rewards
 
     @torch.no_grad()
     def weight_update(self, rewards):
         """
         Conducts the weight updates on the raw parameters and decay sigma/alpha
         """
+        self.logger.write_update_method("Normal")
+
         normal_reward = (rewards - torch.mean(rewards)) / (torch.std(rewards) + 1e-8)
 
         mu_change = (1.0 / (self.npop * self.sigma)) * torch.matmul(self.noise.T, normal_reward)
@@ -188,6 +219,7 @@ class DirectESTrainer(object):
 
     @torch.no_grad()
     def weight_update_with_fitness_shaping(self, rewards):
+        self.logger.write_update_method("Fitness shaping")
 
         # normalise rewards
         rewards = (rewards - torch.mean(rewards)) / (torch.std(rewards) + 1e-8)
@@ -213,15 +245,30 @@ class DirectESTrainer(object):
         if self.sigma > self.sigma_limit:
             self.sigma *= self.sigma_decay
 
-    def update_tracking_data(self, rewards, steps_taken, it_time):
+    @torch.no_grad()
+    def weight_update_with_adam(self, rewards):
+        self.logger.write_update_method("Adam")
+
+        normal_rewards = (rewards - torch.mean(rewards)) / (torch.std(rewards) + 1e-8)
+        mu_change = (1.0 / (self.npop * self.sigma)) * torch.matmul(self.noise.T, normal_rewards)
+
+        self.optimiser.stepsize = self.alpha
+        update_ratio = self.optimiser.update(-mu_change)
+
+        # Decay sigma
+        if self.sigma > self.sigma_limit:
+            self.sigma *= self.sigma_decay
+
+    def update_tracking_data(self, rewards, gen):
         self.tracking_data.update(
             {
                 "Reward / Total reward (mean)": torch.mean(rewards).item(),
+                "Reward / Total reward (max)": torch.max(rewards).item(),
+                "Reward / Total reward (min)": torch.min(rewards).item(),
                 "Hyperparameters / sigma": self.sigma,
                 "Hyperparameters / alpha": self.alpha,
-                "Time / iteration": time.time() - it_time,
-                "Timesteps / total": self.total_timesteps,
-                "Timesteps / generation": steps_taken,
+                "Steps / steps taken": self.total_timesteps,
+                "Generations / Total generations": gen,
             }
         )
 
@@ -234,7 +281,7 @@ class DirectESTrainer(object):
         vector_to_parameters(flat_params, self.policy.parameters())
 
     def save_model(self, identifier):
-        save_path = os.path.join(self.save_dir, f"model_{identifier}.pt")
+        save_path = os.path.join(self.save_dir, f"agent_{identifier}.pt")
 
         if identifier == "best":
             self.load_flat_params(self.best_mu)
@@ -242,7 +289,7 @@ class DirectESTrainer(object):
             self.load_flat_params(self.mu)
 
         save_dict = {
-            "policy_state_dict": self.policy.state_dict(),
+            "policy": self.policy.state_dict(),
             "mu": self.mu if identifier != "best" else self.best_mu,
             "sigma": self.sigma,
             "alpha": self.alpha,
@@ -264,8 +311,9 @@ class DirectESTrainer(object):
             assert self.checkpoint is not None
 
             # load saved params
-            saved_model = torch.load(self.checkpoint)["policy"]
-            self.policy.state_dict().update({k: v for k, v in saved_model.items() if k in self.policy.state_dict()})
+            saved_model = torch.load(self.checkpoint, map_location=self.device, weights_only=False)
+            self.policy.load_state_dict(saved_model["policy"])
+            self.state_preprocessor.load_state_dict(saved_model["state_preprocessor"])
 
             # update mu to be the current params
             self.mu = self._get_w().to(self.device)
@@ -274,15 +322,13 @@ class DirectESTrainer(object):
             # training loop
             it_time = time.time()
 
+            # actual training loop
             self.generate_population()
-            rewards, steps_taken = self.evaluate()
-            self.weight_update_with_fitness_shaping(rewards)
+            rewards = self.evaluate()
+            self.weight_update_with_adam(rewards)
 
-            # update total timesteps
-            self.total_timesteps += steps_taken
-
-            # log details into tensorboard
-            self.update_tracking_data(rewards=rewards, steps_taken=steps_taken, it_time=it_time)
+            # update training data
+            self.update_tracking_data(rewards=rewards, gen=gen)
 
             # obtain mean reward from tracked data
             mean_reward = self.tracking_data["Reward / Total reward (mean)"]
@@ -290,25 +336,39 @@ class DirectESTrainer(object):
             # print generation, mean reward and runtime
             print(
                 f"Generation {gen}: Reward: {mean_reward:.2f}, "
-                f"Timesteps: {self.total_timesteps}, Time: {self.tracking_data['Time / iteration']:.2f}"
+                f"Timesteps: {self.total_timesteps}, Time: {time.time() - it_time:.2f}"
             )
 
-            if self.total_timesteps % self.write_interval == 0:
-                self.write_to_tensorboard(self.total_timesteps)
+            # write every generation (which is <=300 steps)
+            self.write_to_tensorboard(self.total_timesteps)
 
+            # save every 20th
             if gen % self.save_interval == 0 or gen == self.num_gens - 1:
                 self.save_model(gen)
 
+            # if new best reward
             if mean_reward > self.best_reward:
                 self.best_reward = mean_reward
                 self.best_mu = self.mu.clone()
+                # save best model
                 self.save_model("best")
+                # update best reward in logger file
+                self.logger.update_best_reward(self.best_reward)
+
+            # update logger file
+            self.logger.update_timesteps(self.total_timesteps)
+            self.logger.update_generations(gen + 1)
+
+            # if we are terminating after a certain amount of timesteps, then do so
+            if self.max_timesteps:
+                if self.total_timesteps >= self.max_timesteps:
+                    break
 
         training_time = time.time() - start_time
         print("==========Training finished==========")
         print(f"Training time: {training_time:.2f} seconds")
 
-        # save model parameters (into log dir pre_much)
+        self.logger.finalize()
 
         # close writer
         self.writer.close()
@@ -317,38 +377,71 @@ class DirectESTrainer(object):
         """
         Testing loop using specified checkpoint - simply evaluates model
         """
-        print("broken rn")
-        return
-        # # Copy parameters from checkpoint policy to trainer policy
-        # current_policy_dict = self.policy.state_dict()
-        # saved_model = torch.load(checkpoint)["policy"]
+        print("========Start Testing========")
+        start_time = time.time()
 
-        # for name, param in saved_model.items():
-        #     if name in current_policy_dict:
-        #         print(
-        #             f"Shape for {name}: checkpoint {param.data.shape}, current {current_policy_dict[name].data.shape}"
-        #         )
-        #         current_policy_dict[name].data.copy_(param.data)
+        assert self.checkpoint is not None
 
-        # self.policy.load_state_dict(current_policy_dict)
+        if not self.hybrid:  # checkpoint was trained with ES
+            saved_model = torch.load(self.checkpoint)
+            self.policy.load_state_dict(saved_model["policy"])
+            self.state_preprocessor.load_state_dict(saved_model["state_preprocessor"])
+            # update mu to be the current params
+            self.mu = self._get_w().to(self.device)
 
-        # self.w = parameters_to_vector(self.policy.parameters())
-        # pop_w = self.w.repeat(self.npop, 1)
-        # model_arch = self.model_arch
+        else:  # checkpoint was trained with PPO
+            # load saved params from PPO (basically evaluating PPO params in ES workflow)
+            saved_model = torch.load(self.checkpoint)
+            self.policy.load_state_dict(saved_model["policy"])
+            self.state_preprocessor.load_state_dict(saved_model["state_preprocessor"])
+            # update mu to be the current params
+            self.mu = self._get_w().to(self.device)
 
-        # states = self.env.reset()[0]["policy"]
+        all_rewards = []
 
-        # generation_rewards = []
+        ep_idx = 1
 
-        # params = reshape(self.env, pop_w, model_arch, self.device)
+        while True:
+            # Reset the environment and initialize tracking for this evaluation
+            all_dones = torch.zeros(self.npop, dtype=torch.bool, device=self.device)
+            sum_rewards = torch.zeros(self.npop).to(self.device)
+            episode_lengths = torch.zeros(self.npop, dtype=torch.long, device=self.device)
 
-        # print("========Start Testing========")
+            # Reset the environment
+            states, _ = self.env.reset()
 
-        # for gen in range(self.num_gens):
+            # reshape parameters for use with vmap / functional call (all idendical)
+            params = {
+                name: param.unsqueeze(0).expand(self.npop, *param.shape).to(self.device)
+                for name, param in self.policy.named_parameters()
+            }
 
-        #     rewards = self.evaluate(pop_w)
+            while not all_dones.all():  # Keep running until all environments are done
+                # Obtain actions using the current policy parameters
+                actions = self._obtain_parallel_actions(
+                    states=self.state_preprocessor(states), params=params, base_model=self.model_arch
+                )
 
-        #     print(f"Reward: {torch.mean(rewards)}")
+                # Step through the environment
+                next_states, rewards, terminated, truncated, infos = self.env.step(actions)
+                rewards = self.reward_shaper(rewards)
+                self.total_timesteps += 1
 
-        # print("==========Testing finished==========")
-        # # print(f"Testing time: {testing_time:.2f} seconds")
+                dones = torch.bitwise_or(terminated, truncated)
+                all_dones = torch.bitwise_or(all_dones, dones.squeeze())
+
+                # Sum rewards for the current evaluation
+                sum_rewards += rewards.squeeze()
+
+                # Iterate episode length for non-done environments
+                active_envs = ~all_dones
+                episode_lengths[active_envs] += 1
+
+                # Move to the next state
+                states = next_states
+
+            # Store the cumulative reward for this evaluation
+            all_rewards.append(sum_rewards.mean().item())
+            print(f"Episode {ep_idx}: Mean Reward: {sum_rewards.mean().item():.2f}")
+
+            ep_idx += 1
