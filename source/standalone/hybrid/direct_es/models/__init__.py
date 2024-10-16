@@ -1,4 +1,4 @@
-from .mlp import MLP
+from .mlp import SimpleMLP, BiggerMLP
 
 # This allows "from models import MLPMODEL" to work
-mlp = MLP
+mlp = SimpleMLP, BiggerMLP

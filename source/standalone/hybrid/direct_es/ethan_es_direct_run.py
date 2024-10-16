@@ -85,13 +85,14 @@ from omni.isaac.lab_tasks.utils.wrappers.skrl import SkrlVecEnvWrapper
 from omni.isaac.lab_tasks.utils.hydra import hydra_task_config
 
 from ethan_es_direct_trainer import DirectESTrainer
+from utils.scheduler import AdaptiveScheduler
+from models import SimpleMLP, BiggerMLP
 
 # begin configs
 # define traininer configs - will be moved outside of this file
 CARTPOLE_ES_TRAINER_CONFIG_MLP = {
     "num_generations": 100,
     "max_timesteps": None,
-    "max_episode_length": 500,
     "sigma": 0.1,
     "sigma_decay": 0.999,
     "sigma_limit": 0.01,
@@ -105,7 +106,6 @@ CARTPOLE_ES_TRAINER_CONFIG_MLP = {
 CARTPOLE_ES_TRAINER_CONFIG_SHARED = {
     "num_generations": 100,
     "max_timesteps": 2100,
-    "max_episode_length": 500,
     "sigma": 0.01,
     "sigma_decay": 1,
     "sigma_limit": 0.01,
@@ -121,32 +121,34 @@ CARTPOLE_ES_TRAINER_CONFIG_SHARED = {
 
 ANT_ES_TRAINER_CONFIG_MLP = {
     "num_generations": 500,
-    "max_episode_length": 1000,
     "sigma": 0.1,
     "sigma_decay": 0.999,
     "sigma_limit": 0.01,
     "alpha": 0.1,
-    "alpha_decay": 0.9999,
+    "alpha_decay": 0.999,
     "alpha_limit": 0.001,
     "checkpoint": None,
-    "antithetic": False,
+    "antithetic": True,
+    "l2coeff": 1e-2,
+    "rewards_shaper_scale": 0.6,
 }
 
 ANT_ES_TRAINER_CONFIG_SHARED = {
     "num_generations": 500,
     # "max_timesteps": None,
-    "max_episode_length": 1000,
-    "sigma": 0.03,
-    "sigma_decay": 1,
+    "sigma": 0.02,
+    "sigma_decay": 0.999,
     "sigma_limit": 0.01,
-    "alpha": 0.05,
+    "weight_decay": 0.01,
+    "alpha": 0.1,
     "alpha_decay": 1,
     "alpha_limit": 0.001,
     "checkpoint": None,
-    "antithetic": False,
+    "antithetic": True,
     "state_preprocessor": RunningStandardScaler,
     "state_preprocessor_kwargs": None,
     "rewards_shaper_scale": 0.6,
+    "l2coeff": 0.005,
 }
 
 REACH_ES_TRAINER_CONFIG_SHARED = {
@@ -156,11 +158,11 @@ REACH_ES_TRAINER_CONFIG_SHARED = {
     "sigma": 0.1,
     "sigma_decay": 1,
     "sigma_limit": 0.01,
-    "alpha": 0.05,
+    "alpha": 0.1,
     "alpha_decay": 1,
     "alpha_limit": 0.001,
     "checkpoint": None,
-    "antithetic": True,
+    "antithetic": False,
     "state_preprocessor": RunningStandardScaler,
     "rewards_shaper_scale": 1.0,
 }
@@ -304,6 +306,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
     except KeyError:
         pass
 
+    POLICY_DEBUG = False
+
     if args_cli.hybrid:
         # obtain correct policy class based on skrl configs
         policy = shared_model(
@@ -318,6 +322,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
             ],
         )
 
+        if POLICY_DEBUG:
+            from utils.policyPlayground import play_policy_shared
+
+            play_policy_shared(policy, skrl_env)
+
+            # close stuff
+            env.close()
+            simulation_app.close()
+
         # we do not want a lazy value layer in our model as this ruins some ES functionality
         initialise_lazy_linear(policy, policy.observation_space.shape)
 
@@ -325,14 +338,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
         # this allows the forward call to the policy to be differentiable and thus vectorisable
         apply_reparameterisation_patch(policy)
 
-    else:  # this is used for direct ES training / non-hybrid
-        from models import MLP
+        """
+        to do: after the init and the patch, some layers are not on CUDA
+        """
 
-        policy = MLP(
+    else:  # this is used for direct ES training / non-hybrid
+        policy_type = SimpleMLP if args_cli.task == "Isaac-Cartpole-v0" else BiggerMLP
+
+        policy = policy_type(
             observation_space=skrl_env.observation_space,
             action_space=skrl_env.action_space,
             device=skrl_env.device,
         )
+
+        if POLICY_DEBUG:
+            from utils.policyPlayground import play_policy_mlp
+
+            play_policy_mlp(policy, skrl_env)
+
+            # close stuff
+            env.close()
+            simulation_app.close()
 
     # determine custom trainer config
     task_name = args_cli.task.split("-")[1].upper()
