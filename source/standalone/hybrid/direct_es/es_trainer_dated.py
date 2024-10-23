@@ -11,6 +11,7 @@ from torch._functorch.functional_call import functional_call
 from torch.utils.tensorboard.writer import SummaryWriter
 from utils.traininglogger import TrainingLogger
 from utils import utils
+from utils.adam import Adam
 
 import numpy as np
 import time
@@ -19,7 +20,7 @@ import os
 import time
 
 
-class DirectESTrainer(object):
+class ESTrainerDated(object):
     """
     Class which contains main training loop and associated
     """
@@ -45,17 +46,20 @@ class DirectESTrainer(object):
         self.alpha_decay = self.cfg["alpha_decay"]
         self.sigma_limit = self.cfg["sigma_limit"]
         self.alpha_limit = self.cfg["alpha_limit"]
+        self.kl_threshold = self.cfg.get("kl_threshold", 0)
+
+        self.weight_decay = self.cfg.get("weight_decay", 0.01)
 
         self.npop = env.num_envs
 
         self.antithetic = self.cfg["antithetic"]
 
-        # self.mu = torch.zeros(self.num_params, device=self.device)
-        self.mu = torch.randn(self.num_params, device=self.device) * 0.01
+        self.mu = torch.zeros(self.num_params, device=self.device)
+        # self.mu = torch.randn(self.num_params, device=self.device) * 0.01
         # self.mu = parameters_to_vector(self.policy.parameters()).to(self.device)
 
         # adam optimiser
-        self.optimiser = optim.Adam([self.mu], lr=self.alpha, weight_decay=cfg.get("l2coeff", 1e-4))  # type: ignore
+        self.optimiser = Adam(self, stepsize=self.alpha)
 
         # obtain checkpoint if provided in config
         self.checkpoint = self.cfg.get("checkpoint", None)
@@ -93,12 +97,15 @@ class DirectESTrainer(object):
         )
 
         self.tracking_data = {}
-        self.total_timesteps = 0
-        self.generations = 0
+        self.current_timestep = 0
+        self.current_generation = 0
 
         # track best values
         self.best_mu = None
         self.best_reward = float("-inf")
+
+        # rewards shaper
+        self.rewards_shaper = cfg["rewards_shaper"]
 
         # initalise preprocessor if required
         self.state_preprocessor = self.cfg.get("state_preprocessor", None)
@@ -107,9 +114,6 @@ class DirectESTrainer(object):
         else:
             self.state_preprocessor = utils.empty_preprocessor
 
-        # initalise reward shaper (defined in config)
-        self.reward_shaper = self.cfg["rewards_shaper"]
-
         # hybrid init
         if self.checkpoint:
             # load saved params
@@ -117,7 +121,7 @@ class DirectESTrainer(object):
             self.policy.load_state_dict(saved_model["policy"])
 
             # create inital policy to generate actions from it, for use with KL divergence
-            self.inital_policy = copy.deepcopy(self.policy)
+            self.prior_policy = copy.deepcopy(self.policy)
 
             if self.state_preprocessor is not utils.empty_preprocessor:
                 self.state_preprocessor.load_state_dict(saved_model["state_preprocessor"])
@@ -232,7 +236,6 @@ class DirectESTrainer(object):
 
             # Step the environment with the unperturbed actions
             next_states, rewards, terminated, truncated, infos = self.env.step(actions)
-            rewards = self.reward_shaper(rewards)
             sum_rewards += rewards.squeeze()
 
             dones = torch.bitwise_or(terminated, truncated)
@@ -254,14 +257,14 @@ class DirectESTrainer(object):
         """
         all_dones = torch.zeros(self.npop, dtype=torch.bool, device=self.device)
         sum_rewards = torch.zeros(self.npop).to(self.device)
-        kl_divergences = torch.zeros(self.npop).to(self.device)
+        pop_kl_divergences = torch.zeros(self.npop).to(self.device)
+
+        generation_steps = 0
 
         states, _ = self.env.reset()
 
         # reshape population params in order to be vectorised
         params = self._reshape_params()
-
-        generation_steps = 0
 
         while not all_dones.all():
 
@@ -276,16 +279,16 @@ class DirectESTrainer(object):
                     hybrid=self.hybrid,
                 )
 
-                prior_actions, _, prior_outputs = self.inital_policy.act({"states": states}, role="policy")
+                prior_actions, _, prior_outputs = self.prior_policy.act({"states": states}, role="policy")
 
-                # alculate KL divergence
+                # calculate KL divergence
                 with torch.no_grad():
-                    prior_log_std = self.inital_policy.state_dict()["log_std_parameter"]
+                    prior_log_std = self.prior_policy.state_dict()["log_std_parameter"]
                     current_log_std = self.policy.state_dict()["log_std_parameter"]
                     prior_actions_dist = Normal(prior_outputs["mean_actions"], prior_log_std.exp())
                     current_actions_dist = Normal(outputs["mean_actions"], current_log_std.exp())
-                    kl = kl_divergence(current_actions_dist, prior_actions_dist).mean(dim=1)
-                    kl_divergences += kl
+                    kl = kl_divergence(current_actions_dist, prior_actions_dist)
+                    pop_kl_divergences += kl.mean(dim=1)
 
             else:
                 actions = self._obtain_parallel_actions(
@@ -297,7 +300,6 @@ class DirectESTrainer(object):
 
             # step environment
             next_states, rewards, terminated, truncated, infos = self.env.step(actions)
-            rewards = self.reward_shaper(rewards)
             sum_rewards += rewards.squeeze()
 
             # track environments
@@ -307,37 +309,14 @@ class DirectESTrainer(object):
             # iterate steps in generation
             generation_steps += 1
             # count timestep
-            self.total_timesteps += 1
+            self.current_timestep += 1
             # obtain next states
             states = next_states
 
-        kl_coef = 1  # Adjust as needed
-        avg_kl = kl_divergences / generation_steps  # divide accumulated kl divergences by steps in generation
+        # divide kl's by steps
+        pop_kl_divergences = pop_kl_divergences / generation_steps
 
-        if self.hybrid:
-            adjusted_rewards = sum_rewards  # - kl_coef * avg_kl --- currently broken
-        else:
-            adjusted_rewards = sum_rewards
-
-        return {
-            "adjusted_rewards": adjusted_rewards,
-            "sum_rewards": sum_rewards,
-            "kl_divergences": kl_divergences,
-        }
-
-    @torch.no_grad()
-    def weight_update_old(self, rewards):
-        """
-        Conducts the weight updates on the raw parameters and decay sigma/alpha
-        """
-        self.logger.write_update_method("Normal")
-        normal_reward = (rewards - torch.mean(rewards)) / (torch.std(rewards) + 1e-8)
-        mu_change = (1.0 / (self.npop * self.sigma)) * torch.matmul(self.noise.T, normal_reward)
-        self.mu += self.alpha * mu_change
-        if self.alpha > self.alpha_limit:
-            self.alpha *= self.alpha_decay
-        if self.sigma > self.sigma_limit:
-            self.sigma *= self.sigma_decay
+        return sum_rewards, pop_kl_divergences
 
     @torch.no_grad()
     def fitness_shaping(self, rewards):
@@ -364,85 +343,77 @@ class DirectESTrainer(object):
         return final_shaped_returns
 
     @torch.no_grad()
-    def weight_update(self, rewards):
-        # 1. compute fitness
-        rewards = self.fitness_shaping(rewards)
+    def weight_update_plain(self, rewards):
+        # compute fitness
+        # rewards = self.fitness_shaping(rewards)
+        # OR
+        # normalise rewards
+        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
 
-        # 2. multiply noise to be correctly positive or negative
-        if self.multiplier is not None:
-            noise = self.noise * self.multiplier.unsqueeze(1)
-        else:
-            noise = self.noise
+        if self.weight_decay > 0:
+            l2_decay = utils.compute_weight_decay(self.weight_decay, self.pop_w)
+            rewards += l2_decay
 
-        # 3. compute mu change
-        mu_change = (1.0 / (self.npop * self.sigma)) * torch.matmul(noise.T, rewards)
+        # compute mu change
+        mu_change = (1.0 / (self.npop * self.sigma)) * torch.matmul(self.noise.T, rewards)
 
-        # 4. weight decay into gradient
-        # l2coeff = self.cfg.get("l2coeff", 1e-4)
-        # gradient = -mu_change + l2coeff * self.mu
         gradient = -mu_change
 
-        # 5. assign gradient to mu and step optimiser
-        self.mu.grad = gradient
-        self.optimiser.step()
-        self.optimiser.zero_grad()
+        # step optimiser
+        self.optimiser.stepsize = self.alpha
+        update_ratio = self.optimiser.update(gradient)
 
-        # decay sigma
+        # decay hyper params
         if self.sigma > self.sigma_limit:
             self.sigma *= self.sigma_decay
 
-        # decay alpha
         if self.alpha > self.alpha_limit:
             self.alpha *= self.alpha_decay
-            for param_group in self.optimiser.param_groups:
-                param_group["lr"] = self.alpha
+            # for param_group in self.optimiser.param_groups:
+            #     param_group["lr"] = self.alpha
 
     @torch.no_grad()
-    def weight_update_with_adam(self, rewards):
-        self.logger.write_update_method("Adam")
-        self.fitness_shaping(rewards)
+    def weight_update_with_trust_region(self, rewards, pop_kl_divergences):
+        kl_divergence = pop_kl_divergences.mean()
 
-        # 1. compute centered ranks
-        rewards = utils.compute_centered_ranks(rewards)
+        # compute fitness
+        # rewards = self.fitness_shaping(rewards)
+        # OR
+        # normalise rewards
+        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
 
-        # 2. normalise rewards to have zero mean and unit variance
-        mean = torch.mean(rewards)
-        std = torch.std(rewards) + 1e-8
-        normal_rewards = (rewards - mean) / std
+        # weight decay
+        if self.weight_decay > 0:
+            l2_decay = utils.compute_weight_decay(self.weight_decay, self.pop_w)
+            rewards += l2_decay
 
-        # 3. compute mu change
-        mu_change = (1.0 / (self.npop * self.sigma)) * torch.matmul(self.noise.T, normal_rewards)
+        # 2. compute mu change
+        mu_change = (1.0 / (self.npop * self.sigma + 1e-8)) * torch.matmul(self.noise.T, rewards)
+        gradient = -mu_change
 
-        # 4. incofrpoaret weightdecay into gradient directly
-        l2coeff = self.cfg.get("l2coeff", 1e-4)
-        gradient = -mu_change + l2coeff * self.mu
+        # 3. implement trust region
+        proposed_update = gradient
+        if kl_divergence > self.kl_threshold:
+            scaling_factor = torch.sqrt(self.kl_threshold / kl_divergence)
+            proposed_update *= scaling_factor
 
-        # 5. assign gradient to mu and step optimiser
-        self.mu.grad = gradient
-        self.optimiser.step()
-        self.optimiser.zero_grad()
+        # 4. assign gradient to mu and step optimiser
+        self.optimiser.stepsize = self.alpha
+        update_ratio = self.optimiser.update(proposed_update)
 
-        # decay sigma
-        if self.sigma > self.sigma_limit:
-            self.sigma *= self.sigma_decay
-        # go to big sigma after learning for a while
-        if self.generations > 5:
-            self.sigma = 0.1
+        # 5. adaptive sigma based on kl divergence
+        if kl_divergence <= self.kl_threshold:
+            self.sigma = min(self.sigma * 1.1, self.cfg["sigma"])
+        elif kl_divergence > self.kl_threshold:
+            self.sigma = max(self.sigma * 0.9, self.sigma_limit)
 
-        # decay alpha
+        # 7. decay alpha
         if self.alpha > self.alpha_limit:
             self.alpha *= self.alpha_decay
-            for param_group in self.optimiser.param_groups:
-                param_group["lr"] = self.alpha
 
-        # updated inital policy for kl divergence calculations
-        # if self.hybrid:
-        #     vector_to_parameters(self.mu, self.inital_policy.parameters())
-
-        param_norm = torch.norm(self.mu).item()
-        grad_norm = torch.norm(gradient).item()
-        self.writer.add_scalar("Parameters/Norm", param_norm, self.total_timesteps)
-        self.writer.add_scalar("Gradients/Norm", grad_norm, self.total_timesteps)
+        # 8. update comparitive policy to be best from population
+        # best_mu = self.pop_w[rewards.argmax()].clone()
+        # vector_to_parameters(self.mu, self.prior_policy.parameters())
 
     def update_tracking_data(self, rewards, gen):
         self.tracking_data.update(
@@ -461,8 +432,8 @@ class DirectESTrainer(object):
                 "Parameters / Norm": torch.norm(self.mu).item(),
                 "Hyperparameters / sigma": self.sigma,
                 "Hyperparameters / alpha": self.alpha,
-                "Steps / steps taken": self.total_timesteps,
-                "Generations / Total generations": gen,
+                "Steps / steps taken": self.current_timestep,
+                "Generations / Total current_generation": gen,
             }
         )
 
@@ -486,10 +457,11 @@ class DirectESTrainer(object):
 
         save_dict = {
             "policy": self.policy.state_dict(),
+            # "state_preprocessor": self.state_preprocessor.state_dict(),  # COMMENT OUT WHEN RUNNING ES
             "mu": self.mu if identifier != "best" else self.best_mu,
             "sigma": self.sigma,
             "alpha": self.alpha,
-            "total_timesteps": self.total_timesteps,
+            "current_timestep": self.current_timestep,
             "generation": identifier if isinstance(identifier, int) else -1,
         }
 
@@ -509,16 +481,17 @@ class DirectESTrainer(object):
 
             # generate and evaluate population -> return rewards and log probs
             self.generate_population()
-            eval_out = self.evaluate()
+            rewards, pop_kl_divergences = self.evaluate()
 
-            rewards = eval_out["sum_rewards"]
-            adjusted_rewards = eval_out["adjusted_rewards"]
-
-            # leave this here for debugging and logging, but not used in main code
+            # leave this here for debugging and logging, but NOT used in main code
             # unpertrubed_reward = self.evaluate_unperturbed()["sum_rewards"]
 
-            # perform weight update using adam with new alpha
-            self.weight_update(rewards)
+            # shape rewards
+            shaped_rewards = self.rewards_shaper(rewards)
+
+            # perform weight update
+            # self.weight_update_with_trust_region(shaped_rewards, pop_kl_divergences)
+            self.weight_update_plain(shaped_rewards)
 
             # update training data
             self.update_tracking_data(rewards=rewards, gen=gen)
@@ -529,11 +502,11 @@ class DirectESTrainer(object):
             # print generation, mean reward and runtime
             print(
                 f"Generation {gen}: Reward: {mean_reward:.2f}, "
-                f"Timesteps: {self.total_timesteps}, Time: {time.time() - it_time:.2f}"
+                f"Timesteps: {self.current_timestep}, Time: {time.time() - it_time:.2f}"
             )
 
             # write every generation
-            self.write_to_tensorboard(self.total_timesteps)
+            self.write_to_tensorboard(self.current_timestep)
 
             # save every 20th
             if gen % self.save_interval == 0 or gen == self.num_gens - 1:
@@ -549,15 +522,15 @@ class DirectESTrainer(object):
                 self.logger.update_best_reward(self.best_reward)
 
             # update logger file
-            self.logger.update_timesteps(self.total_timesteps)
+            self.logger.update_timesteps(self.current_timestep)
             self.logger.update_generations(gen + 1)
 
             # if we are terminating after a certain amount of timesteps, then do so
             if self.max_timesteps:
-                if self.total_timesteps >= self.max_timesteps:
+                if self.current_timestep >= self.max_timesteps:
                     break
 
-            self.generations += 1
+            self.current_generation += 1
 
         training_time = time.time() - start_time
         print("==========Training finished==========")
@@ -606,17 +579,13 @@ class DirectESTrainer(object):
 
                 # step through the environment
                 next_states, rewards, terminated, truncated, infos = self.env.step(actions)
-                rewards = self.reward_shaper(rewards)
-                self.total_timesteps += 1
+                # sum rewards for the current evaluation
+                sum_rewards += rewards.squeeze()
 
                 dones = torch.bitwise_or(terminated, truncated)
                 all_dones = torch.bitwise_or(all_dones, dones.squeeze())
 
-                # sum rewards for the current evaluation
-                sum_rewards += rewards.squeeze()
-
-                # iterate episode length for non-done environments
-                active_envs = ~all_dones
+                self.current_timestep += 1
 
                 # move to the next state
                 states = next_states

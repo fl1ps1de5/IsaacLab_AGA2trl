@@ -6,17 +6,16 @@ import torch
 
 
 class Optimizer(object):
-    def __init__(self, pi, epsilon=1e-08):
+    def __init__(self, pi):
         self.pi = pi
         self.dim = pi.num_params
-        self.epsilon = epsilon
         self.t = 0
 
     def update(self, globalg):
         self.t += 1
         step = self._compute_step(globalg)
         theta = self.pi.mu
-        ratio = step.norm() / (theta.norm() + self.epsilon)
+        ratio = step.norm() / theta.norm()
         self.pi.mu = theta + step
         return ratio.item()
 
@@ -25,11 +24,12 @@ class Optimizer(object):
 
 
 class Adam(Optimizer):
-    def __init__(self, pi, stepsize, beta1=0.99, beta2=0.999):
+    def __init__(self, pi, stepsize, beta1=0.99, beta2=0.999, epsilon=1e-08):
         super().__init__(pi)
         self.stepsize = stepsize
         self.beta1 = beta1
         self.beta2 = beta2
+        self.epsilon = epsilon
         self.m = torch.zeros(self.dim, dtype=torch.float32, device=pi.mu.device)
         self.v = torch.zeros(self.dim, dtype=torch.float32, device=pi.mu.device)
 

@@ -84,13 +84,16 @@ import omni.isaac.lab_tasks  # noqa: F401
 from omni.isaac.lab_tasks.utils.wrappers.skrl import SkrlVecEnvWrapper
 from omni.isaac.lab_tasks.utils.hydra import hydra_task_config
 
-from ethan_es_direct_trainer import DirectESTrainer
+from es_trainer_dated import ESTrainerDated
+from es_trainer_current import ESTrainer
+from es_trainer_complete import CompleteESTrainer
+
 from utils.scheduler import AdaptiveScheduler
 from models import SimpleMLP, BiggerMLP
 
 # begin configs
 # define traininer configs - will be moved outside of this file
-CARTPOLE_ES_TRAINER_CONFIG_MLP = {
+CARTPOLE_TRAINER_CONFIG_ES = {
     "num_generations": 100,
     "max_timesteps": None,
     "sigma": 0.1,
@@ -100,109 +103,118 @@ CARTPOLE_ES_TRAINER_CONFIG_MLP = {
     "alpha_decay": 0.9999,
     "alpha_limit": 0.001,
     "checkpoint": None,
-    "antithetic": False,
+    "antithetic": True,  # cannot be turned off
+    "state_preprocessor": RunningStandardScaler,
 }
 
 CARTPOLE_ES_TRAINER_CONFIG_SHARED = {
     "num_generations": 100,
     "max_timesteps": 2100,
-    "sigma": 0.01,
+    "sigma": 0.05,
     "sigma_decay": 1,
     "sigma_limit": 0.01,
-    "alpha": 0.01,
-    "alpha_decay": 1,
-    "alpha_limit": 0.001,
-    "checkpoint": None,
-    "antithetic": True,
-    "state_preprocessor": None,
-    "state_preprocessor_kwargs": None,
-    "rewards_shaper_scale": 1.0,
-}
-
-ANT_ES_TRAINER_CONFIG_MLP = {
-    "num_generations": 500,
-    "sigma": 0.1,
-    "sigma_decay": 0.999,
-    "sigma_limit": 0.01,
-    "alpha": 0.1,
-    "alpha_decay": 0.999,
-    "alpha_limit": 0.001,
-    "checkpoint": None,
-    "antithetic": True,
-    "l2coeff": 1e-2,
-    "rewards_shaper_scale": 0.6,
-}
-
-ANT_ES_TRAINER_CONFIG_SHARED = {
-    "num_generations": 500,
-    # "max_timesteps": None,
-    "sigma": 0.02,
-    "sigma_decay": 0.999,
-    "sigma_limit": 0.01,
-    "weight_decay": 0.01,
-    "alpha": 0.1,
-    "alpha_decay": 1,
-    "alpha_limit": 0.001,
-    "checkpoint": None,
-    "antithetic": True,
-    "state_preprocessor": RunningStandardScaler,
-    "state_preprocessor_kwargs": None,
-    "rewards_shaper_scale": 0.6,
-    "l2coeff": 0.005,
-}
-
-REACH_ES_TRAINER_CONFIG_SHARED = {
-    "num_generations": 500,
-    # "max_timesteps": None,
-    "max_episode_length": 1000,
-    "sigma": 0.1,
-    "sigma_decay": 1,
-    "sigma_limit": 0.01,
-    "alpha": 0.1,
+    "alpha": 0.05,
     "alpha_decay": 1,
     "alpha_limit": 0.001,
     "checkpoint": None,
     "antithetic": False,
-    "state_preprocessor": RunningStandardScaler,
-    "rewards_shaper_scale": 1.0,
 }
+
+ANT_TRAINER_CONFIG_ES = {
+    "num_generations": 40,
+    "sigma": 0.02,
+    # "sigma_decay": 1,
+    # "sigma_limit": 0,
+    "alpha": 0.01,
+    # "alpha_decay": 1,
+    # "alpha_limit": 0,
+    "checkpoint": None,
+    "antithetic": True,
+    "state_preprocessor": RunningStandardScaler,
+    # "weight_decay": 1,
+    # "rewards_shaper_scale": 0.6,
+}
+
+ANT_TRAINER_CONFIG_HYBRID = {
+    "num_generations": 20,
+    "sigma": 0.01,
+    # "sigma_decay": 1,
+    # "sigma_limit": 0,
+    "alpha": 0.001,
+    # "alpha_decay": 0.995,
+    # "alpha_limit": 0,
+    "checkpoint": None,
+    "ntrials": 3,
+    "antithetic": True,
+    "state_preprocessor": RunningStandardScaler,
+    # "weight_decay": 0.01,
+    "kl_threshold": 0.5,
+}
+
+REACH_TRAINER_CONFIG_ES = {
+    "num_generations": 20,
+    "sigma": 0.02,
+    # "sigma_decay": 1,
+    # "sigma_limit": 0,
+    "alpha": 0.01,
+    # "alpha_decay": 0.995,
+    # "alpha_limit": 0,
+    "checkpoint": None,
+    "antithetic": True,
+    "state_preprocessor": RunningStandardScaler,
+    # "weight_decay": 0.01,
+    "kl_threshold": 0.5,
+}
+
+
 # end configs
 
 DETERMINISTIC_ES = False
+ACTION_NOISE = True  # enables deterministc ES with noise applied to the actions
 
 
 def reparameterised_act(self, inputs, role):
-    mean_actions, log_std, outputs = self.compute(inputs, role)
+    if role == "policy":
+        mean_actions, log_std, outputs = self.compute(inputs, role)
 
-    # clamp log standard deviations
-    if self._clip_log_std:
-        log_std = torch.clamp(log_std, self._log_std_min, self._log_std_max)
-        std = torch.exp(log_std)
+        # clamp log standard deviations
+        if self._clip_log_std:
+            log_std = torch.clamp(log_std, self._log_std_min, self._log_std_max)
+            # log_std = torch.clamp(log_std, -2.0, 2)
 
-    self._log_std = log_std
-    self._num_samples = mean_actions.shape[0]
+        self._log_std = log_std
+        self._num_samples = mean_actions.shape[0]
 
-    # create a distribution for use with log_prob computation
-    self._distribution = Normal(mean_actions, log_std.exp())
+        # create a distribution for use with log_prob computation
+        self._distribution = Normal(mean_actions, log_std.exp())
 
-    # obtain actions by using reparametrisation trick with no inplace randomness
-    epsilon = torch.randn_like(mean_actions)
-    actions = mean_actions + epsilon * log_std.exp()
+        epsilon = torch.randn_like(mean_actions)
+        if not ACTION_NOISE:
+            # obtain actions by using reparametrisation trick with no inplace randomness
+            actions = mean_actions + epsilon * log_std.exp()
+        else:  # very similar but add noise directly to actions
+            ac_noise_std = 0.01
+            actions = mean_actions + epsilon * ac_noise_std
 
-    # clip actions
-    if self._clip_actions:
-        actions = torch.clamp(actions, min=self._clip_actions_min, max=self._clip_actions_max)
+        # clip actions
+        if self._clip_actions:
+            actions = torch.clamp(actions, min=self._clip_actions_min, max=self._clip_actions_max)
 
-    # log of the probability density function
-    log_prob = self._distribution.log_prob(inputs.get("taken_actions", actions))
-    if self._reduction is not None:
-        log_prob = self._reduction(log_prob, dim=-1)
-    if log_prob.dim() != actions.dim():
-        log_prob = log_prob.unsqueeze(-1)
+        # log of the probability density function
+        log_prob = self._distribution.log_prob(inputs.get("taken_actions", actions))
+        if self._reduction is not None:
+            log_prob = self._reduction(log_prob, dim=-1)
+        if log_prob.dim() != actions.dim():
+            log_prob = log_prob.unsqueeze(-1)
 
-    outputs["mean_actions"] = mean_actions
+        outputs["mean_actions"] = mean_actions
 
-    return (mean_actions if DETERMINISTIC_ES else actions), log_prob, outputs
+        return (mean_actions if DETERMINISTIC_ES else actions), log_prob, outputs
+
+    elif role == "value":
+        # we only include the value roll in our ES implementation as it is neccecary to intialize the Lazy layers of the policy
+        actions, outputs = self.compute(inputs, role)
+        return actions, None, outputs
 
 
 def apply_reparameterisation_patch(model):
@@ -306,68 +318,35 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
     except KeyError:
         pass
 
-    POLICY_DEBUG = False
+    # obtain correct policy class based on skrl configs
+    policy = shared_model(
+        observation_space=skrl_env.observation_space,
+        action_space=skrl_env.action_space,
+        device=skrl_env.device,
+        structure=None,
+        roles=["policy", "value"],
+        parameters=[
+            process_cfg(cfg["models"]["policy"]),
+            process_cfg(cfg["models"]["value"]),
+        ],
+    )
 
-    if args_cli.hybrid:
-        # obtain correct policy class based on skrl configs
-        policy = shared_model(
-            observation_space=skrl_env.observation_space,
-            action_space=skrl_env.action_space,
-            device=skrl_env.device,
-            structure=None,
-            roles=["policy", "value"],
-            parameters=[
-                process_cfg(cfg["models"]["policy"]),
-                process_cfg(cfg["models"]["value"]),
-            ],
-        )
+    apply_reparameterisation_patch(policy)
 
-        if POLICY_DEBUG:
-            from utils.policyPlayground import play_policy_shared
-
-            play_policy_shared(policy, skrl_env)
-
-            # close stuff
-            env.close()
-            simulation_app.close()
-
-        # we do not want a lazy value layer in our model as this ruins some ES functionality
-        initialise_lazy_linear(policy, policy.observation_space.shape)
-
-        # we will now monkey-patch the policy to implement the reparametrisation trick
-        # this allows the forward call to the policy to be differentiable and thus vectorisable
-        apply_reparameterisation_patch(policy)
-
-        """
-        to do: after the init and the patch, some layers are not on CUDA
-        """
-
-    else:  # this is used for direct ES training / non-hybrid
-        policy_type = SimpleMLP if args_cli.task == "Isaac-Cartpole-v0" else BiggerMLP
-
-        policy = policy_type(
-            observation_space=skrl_env.observation_space,
-            action_space=skrl_env.action_space,
-            device=skrl_env.device,
-        )
-
-        if POLICY_DEBUG:
-            from utils.policyPlayground import play_policy_mlp
-
-            play_policy_mlp(policy, skrl_env)
-
-            # close stuff
-            env.close()
-            simulation_app.close()
+    # policy = SimpleMLP(
+    #     observation_space=skrl_env.observation_space,
+    #     action_space=skrl_env.action_space,
+    #     device=skrl_env.device,
+    # )
 
     # determine custom trainer config
     task_name = args_cli.task.split("-")[1].upper()
 
     # obtain config based on policy
-    config_policy = "SHARED" if args_cli.hybrid else "MLP"
+    config_type = "HYBRID" if args_cli.hybrid else "ES"
 
     # obtain trainer config
-    config_name = f"{task_name}_ES_TRAINER_CONFIG_{config_policy}"
+    config_name = f"{task_name}_TRAINER_CONFIG_{config_type}"
 
     # load the trainer config based on task name
     try:
@@ -398,8 +377,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
     agent_cfg.update(process_cfg(agent_cfg))
     trainer_config["rewards_shaper"] = agent_cfg["rewards_shaper"]
 
-    # pass into trainer
-    trainer = DirectESTrainer(cfg=trainer_config, env=skrl_env, policy=policy)
+    # pass into trainer (note which trainer im using atm)
+    trainer = CompleteESTrainer(cfg=trainer_config, env=skrl_env, policy=policy)
+    # trainer = ESTrainer(cfg=trainer_config, env=skrl_env, policy=policy)
+    # trainer = ESTrainerDated(cfg=trainer_config, env=skrl_env, policy=policy)
 
     # pre-experiment outputs
     print("\n" * 3, "========================" + "\n")
@@ -411,7 +392,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
 
     # check if we should test
     if args_cli.test:
-        trainer.test()
+        trainer.test()  # not implemented yet
     # else train
     else:
         trainer.train()

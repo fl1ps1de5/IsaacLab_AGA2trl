@@ -1,11 +1,16 @@
+# THIS FILE DEFINES SOME GENERAL ES BASED UTILITIES
+
 from typing import Any
 import torch
 
 
-# define because cannot use lambda with pytorch vmap etc
+# defined because cannot use lambda with pytorch vmap etc
 # modified from skrl.agents.torch.base.Agent._empty_preprocessor
 def empty_preprocessor(input: Any, *args, **kwargs) -> Any:
     return input
+
+
+"""ADD SOURCES AND LINKS TO THE BELOW"""
 
 
 def _compute_ranks(x):
