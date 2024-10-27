@@ -44,3 +44,35 @@ def compute_weight_decay(weight_decay, model_param_tensor):
     weight_decay_penalty = -weight_decay * mean_squared  # Shape: [npop]
 
     return weight_decay_penalty
+
+
+import torch
+
+# taken from https://github.com/PaoloP84/EfficacyModernES/blob/master/modern_es.py#L511
+
+
+def ascendent_sort(vect):
+    # Create a copy of the vector
+    tmpv = vect.clone()
+    n = tmpv.size(0)
+    # Index list to keep track of original indices
+    index = torch.arange(n, dtype=torch.int32, device=vect.device)
+    i = 0
+    while i < n:
+        # Look for minimum value in tmpv
+        minv = tmpv[0]
+        mini = 0
+        j = 1
+        while j < n:
+            if tmpv[j] < minv:
+                minv = tmpv[j]
+                mini = j
+            j += 1
+        # Place the found minimum in the sorted array
+        vect[i] = tmpv[mini]
+        index[i] = mini
+        i += 1
+        # Set the selected minimum to a large value to prevent reuse
+        tmpv[mini] = float("inf")
+
+    return vect, index

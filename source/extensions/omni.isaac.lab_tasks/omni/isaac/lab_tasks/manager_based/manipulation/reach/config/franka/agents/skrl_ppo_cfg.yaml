@@ -1,4 +1,4 @@
-seed:
+seed: 42
 
 
 # Models are instantiated using skrl's model instantiator utility

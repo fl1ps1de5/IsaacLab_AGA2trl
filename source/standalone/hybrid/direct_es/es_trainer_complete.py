@@ -18,7 +18,7 @@ import copy
 import os
 import time
 
-SEED = 86
+SEED = 42
 
 
 class CompleteESTrainer(object):
@@ -50,7 +50,6 @@ class CompleteESTrainer(object):
         self.antithetic = self.cfg.get("antithetic", False)
         # env hyperparameters
         self.npop = env.num_envs
-        self.batch_size = self.npop // 2 if self.antithetic else self.npop
         # obtain testing / hybrid checkpoint
         self.checkpoint = self.cfg.get("checkpoint", None)
         self.hybrid = self.cfg.get("hybrid", False)
@@ -70,7 +69,7 @@ class CompleteESTrainer(object):
                 self.mu = torch.zeros(self.num_params, device=self.device)
             elif init_method == 1:
                 self.mu = LayerwiseInitializer.initialize_flat_params(self.policy)
-                self._load_flat_params(self.mu)
+            self._load_flat_params(self.mu)
         # hybrid init
         else:
             self._checkpoint_setup()
@@ -104,7 +103,7 @@ class CompleteESTrainer(object):
     def _recording_setup(self) -> None:
         """Sets up logging and writing functionality for trainer"""
         endstring = "_hybrid_torch" if self.hybrid else "_es_torch"
-        log_string = f"seed_{SEED}_alpha_{self.alpha}_sigma_{self.sigma}"
+        log_string = f"seed_{SEED}_alpha_{self.alpha}_sigma_{self.sigma}_kl_{self.kl_threshold}"
 
         self.log_dir = os.path.join(self.cfg["logdir"], log_string + endstring)
         # initiate writer + save functionality
@@ -240,22 +239,57 @@ class CompleteESTrainer(object):
     def _generate_population(self) -> torch.Tensor:
         """Generate a population of candidate parameters by applying noise to self.mu
 
+        Here we also implement trust regions in a novel way, by calculating the kl divergence
+        of the candidate population before evaluation and scaling it down when necessary.
+
         self.pop_w has shape [npop, num_params] and is the population of candidate parameters
 
         self.noise is the noise created for this generation
         """
-        samples = torch.randn(self.batch_size, self.num_params, device=self.device)
+        samples = torch.randn(self.npop // 2, self.num_params, device=self.device)
 
         self.symmSamples = torch.zeros(self.npop, self.num_params, device=self.device)
 
-        for i in range(self.batch_size):
+        for i in range(self.npop // 2):
             idx = 2 * i
             self.symmSamples[idx] = samples[i]
             self.symmSamples[idx + 1] = -samples[i]
 
         pop_w = self.mu.unsqueeze(0) + self.sigma * self.symmSamples
 
+        if self.hybrid and self.kl_threshold > 0:
+            # we are now  going to calculate kl divergence for each perturbation
+            # we will use this kl divergence to scale the perturbations
+            params = self._reshape_params(pop_w)
+            # now lets sample some states
+            states, _ = self.env.reset()
+            states = self.state_preprocessor(states)
+            # obtain current outputs
+            _, _, current_outputs = self._obtain_parallel_actions(states, params, self.model_arch, hybrid=self.hybrid)
+            # obtain outputs using previous policy
+            _, _, prior_outputs = self.prior_policy.act({"states": states}, role="policy")
+            # now
+            kl = self._calculate_kl_divergence(prior_outputs, current_outputs)
+            # scale perturbations based on KL
+            scaling_factors = torch.ones(self.npop, device=self.device)
+            mask = kl > self.kl_threshold
+            scaling_factors[mask] = self.kl_threshold / kl[mask]
+            # finally
+            scaled_perturbations = self.sigma * (self.symmSamples * scaling_factors.unsqueeze(1))
+            self.scaled_symmSamples = scaled_perturbations / self.sigma  # store for update later
+            pop_w = self.mu.unsqueeze(0) + scaled_perturbations
+
         return pop_w
+
+    @torch.no_grad()
+    def _calculate_kl_divergence(self, prior_outputs, current_outputs):
+        prior_log_std = self.prior_policy.state_dict()["log_std_parameter"]
+        current_log_std = self.policy.state_dict()["log_std_parameter"]
+        prior_actions_dist = Normal(prior_outputs["mean_actions"], prior_log_std.exp())
+        current_actions_dist = Normal(current_outputs["mean_actions"], current_log_std.exp())
+        kl = kl_divergence(current_actions_dist, prior_actions_dist).mean(dim=1)
+        print(f"Avg KL Divergence: {kl.mean().item()}")
+        return kl
 
     @torch.no_grad()
     def _evaluate_population(self):
@@ -265,24 +299,18 @@ class CompleteESTrainer(object):
 
         # Step 2: Evaluate population
         total_rewards = torch.zeros(self.npop, device=self.device)
-        total_kl = torch.zeros(self.npop, device=self.device)
 
         for trial in range(self.cfg.get("ntrials", 1)):
             if self.hybrid:
-                rewards, kl = self._rollout_population_hybrid(pop_w)
+                rewards = self._rollout_population_hybrid(pop_w)
             else:
                 rewards, _ = self._rollout_population_es(pop_w)
             total_rewards += rewards
-            total_kl += kl
 
         avg_rewards = total_rewards / self.cfg.get("ntrials", 1)
-        avg_kl = total_kl / self.cfg.get("ntrials", 1)
 
         # Step 3: return the average rewards over trials
-        if self.hybrid:
-            return avg_rewards, avg_kl
-        else:
-            return avg_rewards
+        return avg_rewards
 
     @torch.no_grad()
     def _rollout_population_es(self, pop_w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -306,89 +334,63 @@ class CompleteESTrainer(object):
         return sum_rewards, all_dones
 
     @torch.no_grad()
-    def _rollout_population_hybrid(self, pop_w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        assert self.hybrid is True, "Hybrid flag must be set to True to use this method"
-
+    def _rollout_population_hybrid(self, pop_w: torch.Tensor) -> torch.Tensor:
         """Rollout the population through the environment and obtain summed rewards and KL.
         We obtain KL data as a way to manage policy updates"""
+
+        assert self.hybrid is True, "Hybrid flag must be set to True to use this method"
+
         all_dones = torch.zeros(self.npop, dtype=torch.bool, device=self.device)
         sum_rewards = torch.zeros(self.npop, device=self.device)
-        pop_kl_divergences = torch.zeros(self.npop, device=self.device)
 
         states, _ = self.env.reset()
         params = self._reshape_params(pop_w)
-        generation_steps = 0
 
         while not all_dones.all():
             states = self.state_preprocessor(states, train=True)
             actions, log_prob, outputs = self._obtain_parallel_actions(states, params, self.model_arch, hybrid=True)
-            # obtain data from prior policy
-            prior_actions, _, prior_outputs = self.prior_policy.act({"states": states}, role="policy")
-            # calculate KL divergence based on generation log_prob and prior log_prob
-            with torch.no_grad():
-                prior_log_std = self.prior_policy.state_dict()["log_std_parameter"]
-                current_log_std = self.policy.state_dict()["log_std_parameter"]
-                prior_actions_dist = Normal(prior_outputs["mean_actions"], prior_log_std.exp())
-                current_actions_dist = Normal(outputs["mean_actions"], current_log_std.exp())
-                kl = kl_divergence(current_actions_dist, prior_actions_dist)
-                pop_kl_divergences += kl.mean(dim=1)
 
             next_states, rewards, terminated, truncated, infos = self.env.step(actions)
             self.current_timestep += 1
+
             sum_rewards += rewards.squeeze()
             dones = torch.bitwise_or(terminated, truncated)
             all_dones = torch.bitwise_or(all_dones, dones.squeeze())
-            generation_steps += 1
             states = next_states
 
-        pop_kl_divergences = pop_kl_divergences / generation_steps
-        return sum_rewards, pop_kl_divergences
+        return sum_rewards
 
     @torch.no_grad()
-    def _compute_update_complex(self, fitness, metric):
-        kl_divergence = metric.mean()
+    def _compute_update_hybrid(self, fitness):
 
-        # sort by fitness and compute utilities
-        sorted_fitness, indicies = torch.sort(fitness, descending=False)
-        utilities = torch.zeros_like(fitness, device=self.device)
+        # rank the fitness scores in descending order (higher is better)
+        sorted_fitness, indices = torch.sort(fitness, descending=False)
 
-        for i in range(self.npop):
-            utilities[indicies[i]] = i
+        # assign ranks (0 to npop - 1)
+        ranks = torch.zeros_like(fitness)
+        ranks[indices] = torch.arange(self.npop, device=self.device).type_as(fitness)
 
-        utilities /= self.npop - 1
-        utilities -= 0.5
+        # compute utilities based on ranks
+        utilities = ranks
+        utilities /= self.npop - 1  # normalise ranks to [0, 1]
+        utilities -= 0.5  # Shift to [-0.5, 0.5]
 
-        # compute weights
-        weights = torch.zeros(self.batch_size, device=self.device)
-        for i in range(self.batch_size):
-            idx = 2 * i
-            weights[i] = utilities[idx] - utilities[idx + 1]
+        # ensure utilities have zero mean
+        utilities -= utilities.mean()
 
-        # compute gradient chunk
-        g = torch.zeros_like(self.mu, device=self.device)
-        i = 0
-        while i < self.batch_size:
-            gsize = min(500, self.batch_size - i)
-            g += torch.matmul(
-                weights[i : i + gsize],
-                self.symmSamples[i : i + gsize],
-            )
-            i += gsize
+        # compute the parameter update using utilities instead of raw fitness
+        # ensure we use the scaled symmetric samples as this is what created the population
+        mu_change = (1.0 / (self.npop * self.sigma)) * torch.matmul(self.symmSamples.T, utilities)
 
-        # normalise gradient
-        g /= self.npop
-
-        # implement trust region
-        if kl_divergence > self.kl_threshold and self.kl_threshold > 0:
-            scaling_factor = torch.sqrt(self.kl_threshold / kl_divergence)
-            g *= scaling_factor
-
-        globalg = -g + 0.005 * self.mu
+        globalg = -mu_change + 0.005 * self.mu
 
         self.optimiser.stepsize = self.alpha
         update_ratio = self.optimiser.update(globalg)
 
-    def _compute_update(self, fitness):
+        # decay sigma too
+        self.sigma = max(self.sigma * self.sigma_decay, self.sigma_limit)
+
+    def _compute_update_es(self, fitness):
         fitness = (fitness - fitness.mean()) / (fitness.std() + 1e-8)
 
         mu_change = (1.0 / (self.npop * self.sigma)) * torch.matmul(self.symmSamples.T, fitness)
@@ -417,6 +419,19 @@ class CompleteESTrainer(object):
         )
 
     def _post_generation(self, step, mean_reward):
+        # implementation details
+
+        # grow kl_threshold
+        self.kl_threshold *= self.cfg.get("kl_exploration_factor", 1)
+
+        # load mu into self.policy for KL divergence calculations
+        self._load_flat_params(self.mu)
+        # update comparitive policy every some generations to encourage more exploration
+        if self.current_generation % self.cfg.get("update_ref_policy_gen", 100) == 0:
+            vector_to_parameters(self.mu, self.prior_policy.parameters())
+
+        # logging details
+
         self._write_to_tensorboard(step)
         # save model every so often
         if self.current_generation % self.save_interval == 0 or self.current_generation == self.num_gens - 1:
@@ -476,14 +491,12 @@ class CompleteESTrainer(object):
             # training loop
             it_time = time.time()
             # evaluate population in environment
-            if self.hybrid:
-                fitness, kl = self._evaluate_population()
-                self._compute_update_complex(fitness, kl)
-                print(kl.mean())
-            else:
-                fitness = self._evaluate_population()
-                self._compute_update_complex(fitness, metric=None)
+            fitness = self._evaluate_population()
             # perform update
+            if self.hybrid:
+                self._compute_update_hybrid(fitness)
+            else:
+                self._compute_update_es(fitness)
             # update training data
             self._update_tracking_data(rewards=fitness, gen=gen)
             # obtain mean reward from tracked data

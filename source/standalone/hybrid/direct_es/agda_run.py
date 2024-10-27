@@ -94,38 +94,39 @@ from models import SimpleMLP, BiggerMLP
 # begin configs
 # define traininer configs - will be moved outside of this file
 CARTPOLE_TRAINER_CONFIG_ES = {
-    "num_generations": 100,
+    "num_generations": 10,
     "max_timesteps": None,
-    "sigma": 0.1,
-    "sigma_decay": 0.999,
-    "sigma_limit": 0.01,
+    "sigma": 0.05,
+    # "sigma_decay": 0.999,
+    # "sigma_limit": 0.01,
     "alpha": 0.1,
-    "alpha_decay": 0.9999,
-    "alpha_limit": 0.001,
+    # "alpha_decay": 0.9999,
+    # "alpha_limit": 0.001,
     "checkpoint": None,
-    "antithetic": True,  # cannot be turned off
-    "state_preprocessor": RunningStandardScaler,
+    "antithetic": True,
+    # "state_preprocessor": RunningStandardScaler,
 }
 
-CARTPOLE_ES_TRAINER_CONFIG_SHARED = {
-    "num_generations": 100,
-    "max_timesteps": 2100,
+CARTPOLE_TRAINER_CONFIG_HYBRID = {
+    "num_generations": 10,
+    # "max_timesteps": 2100,
     "sigma": 0.05,
-    "sigma_decay": 1,
-    "sigma_limit": 0.01,
+    # "sigma_decay": 1,
+    # "sigma_limit": 0.01,
     "alpha": 0.05,
-    "alpha_decay": 1,
-    "alpha_limit": 0.001,
+    # "alpha_decay": 1,
+    # "alpha_limit": 0.001,
     "checkpoint": None,
-    "antithetic": False,
+    "antithetic": True,
+    "kl_threshold": 0.05,
 }
 
 ANT_TRAINER_CONFIG_ES = {
     "num_generations": 40,
-    "sigma": 0.02,
+    "sigma": 0.05,
     # "sigma_decay": 1,
     # "sigma_limit": 0,
-    "alpha": 0.01,
+    "alpha": 0.05,
     # "alpha_decay": 1,
     # "alpha_limit": 0,
     "checkpoint": None,
@@ -136,6 +137,40 @@ ANT_TRAINER_CONFIG_ES = {
 }
 
 ANT_TRAINER_CONFIG_HYBRID = {
+    "num_generations": 30,
+    "update_ref_policy_gen": 100,
+    "sigma": 0.025,
+    "sigma_decay": 0.95,
+    "sigma_limit": 0.005,
+    "alpha": 0.005,
+    # "alpha_decay": 0.995,
+    # "alpha_limit": 0,
+    # "ntrials": 3,
+    "checkpoint": None,
+    # "ntrials": 3,
+    "antithetic": True,
+    "state_preprocessor": RunningStandardScaler,
+    # "weight_decay": 0.01,
+    "kl_threshold": 0.08,
+    "kl_exploration_factor": 1.1,
+}
+
+VELOCITY_TRAINER_CONFIG_HYBRID = {
+    "num_generations": 20,
+    "sigma": 0.03,
+    # "sigma_decay": 1,
+    # "sigma_limit": 0,
+    "alpha": 0.005,
+    # "alpha_decay": 0.995,
+    # "alpha_limit": 0,
+    "checkpoint": None,
+    "antithetic": True,
+    # "weight_decay": 0.01,
+    "kl_threshold": 0.05,
+    "kl_exploration_factor": 1.15,
+}
+
+REACH_TRAINER_CONFIG_HYBRID = {
     "num_generations": 20,
     "sigma": 0.01,
     # "sigma_decay": 1,
@@ -144,33 +179,18 @@ ANT_TRAINER_CONFIG_HYBRID = {
     # "alpha_decay": 0.995,
     # "alpha_limit": 0,
     "checkpoint": None,
-    "ntrials": 3,
     "antithetic": True,
     "state_preprocessor": RunningStandardScaler,
     # "weight_decay": 0.01,
-    "kl_threshold": 0.5,
-}
-
-REACH_TRAINER_CONFIG_ES = {
-    "num_generations": 20,
-    "sigma": 0.02,
-    # "sigma_decay": 1,
-    # "sigma_limit": 0,
-    "alpha": 0.01,
-    # "alpha_decay": 0.995,
-    # "alpha_limit": 0,
-    "checkpoint": None,
-    "antithetic": True,
-    "state_preprocessor": RunningStandardScaler,
-    # "weight_decay": 0.01,
-    "kl_threshold": 0.5,
+    "kl_threshold": 0.05,
+    "kl_exploration_factor": 1.0,
 }
 
 
 # end configs
 
 DETERMINISTIC_ES = False
-ACTION_NOISE = True  # enables deterministc ES with noise applied to the actions
+ACTION_NOISE = False  # enables deterministc ES with constant noise applied to the actions
 
 
 def reparameterised_act(self, inputs, role):
@@ -185,16 +205,17 @@ def reparameterised_act(self, inputs, role):
         self._log_std = log_std
         self._num_samples = mean_actions.shape[0]
 
+        # use policy learned std for KL calculation
+        policy_std = log_std.exp()
+
         # create a distribution for use with log_prob computation
         self._distribution = Normal(mean_actions, log_std.exp())
 
+        # use fixed exploration noise for actions during ES
+        # note: this doesnt effect KL calculations as these are done using outputs rather than the log_prob directly
+        exploration_std = 0.01
         epsilon = torch.randn_like(mean_actions)
-        if not ACTION_NOISE:
-            # obtain actions by using reparametrisation trick with no inplace randomness
-            actions = mean_actions + epsilon * log_std.exp()
-        else:  # very similar but add noise directly to actions
-            ac_noise_std = 0.01
-            actions = mean_actions + epsilon * ac_noise_std
+        actions = mean_actions + epsilon * exploration_std
 
         # clip actions
         if self._clip_actions:
@@ -209,7 +230,7 @@ def reparameterised_act(self, inputs, role):
 
         outputs["mean_actions"] = mean_actions
 
-        return (mean_actions if DETERMINISTIC_ES else actions), log_prob, outputs
+        return actions, log_prob, outputs
 
     elif role == "value":
         # we only include the value roll in our ES implementation as it is neccecary to intialize the Lazy layers of the policy
@@ -332,6 +353,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
     )
 
     apply_reparameterisation_patch(policy)
+
+    # policy = BiggerMLP(
+    #     observation_space=skrl_env.observation_space,
+    #     action_space=skrl_env.action_space,
+    #     device=skrl_env.device,
+    # )
 
     # policy = SimpleMLP(
     #     observation_space=skrl_env.observation_space,
