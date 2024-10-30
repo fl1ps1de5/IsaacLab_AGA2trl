@@ -108,7 +108,7 @@ CARTPOLE_TRAINER_CONFIG_ES = {
 }
 
 CARTPOLE_TRAINER_CONFIG_HYBRID = {
-    "num_generations": 10,
+    "num_generations": 5,
     # "max_timesteps": 2100,
     "sigma": 0.05,
     # "sigma_decay": 1,
@@ -136,28 +136,33 @@ ANT_TRAINER_CONFIG_ES = {
     # "rewards_shaper_scale": 0.6,
 }
 
-ANT_TRAINER_CONFIG_HYBRID = {
-    "num_generations": 30,
-    "update_ref_policy_gen": 100,
+ANT_TRAINER_CONFIG_HYBRID = {  # FINALIZED
+    "num_generations": 6,
     "sigma": 0.025,
     "sigma_decay": 0.95,
     "sigma_limit": 0.005,
     "alpha": 0.005,
-    # "alpha_decay": 0.995,
-    # "alpha_limit": 0,
-    # "ntrials": 3,
     "checkpoint": None,
-    # "ntrials": 3,
     "antithetic": True,
     "state_preprocessor": RunningStandardScaler,
-    # "weight_decay": 0.01,
-    "kl_threshold": 0.08,
-    "kl_exploration_factor": 1.1,
+    "kl_threshold": 0.1,
 }
 
 VELOCITY_TRAINER_CONFIG_HYBRID = {
+    "num_generations": 3,
+    "sigma": 0.05,
+    "sigma_decay": 0.95,
+    # "sigma_limit": 0.005,
+    "alpha": 0.01,
+    "checkpoint": None,
+    "antithetic": True,
+    "kl_threshold": 0.05,
+    "state_preprocessor": RunningStandardScaler,
+}
+
+REACH_TRAINER_CONFIG_HYBRID = {
     "num_generations": 20,
-    "sigma": 0.03,
+    "sigma": 0.02,
     # "sigma_decay": 1,
     # "sigma_limit": 0,
     "alpha": 0.005,
@@ -165,32 +170,13 @@ VELOCITY_TRAINER_CONFIG_HYBRID = {
     # "alpha_limit": 0,
     "checkpoint": None,
     "antithetic": True,
-    # "weight_decay": 0.01,
-    "kl_threshold": 0.05,
-    "kl_exploration_factor": 1.15,
-}
-
-REACH_TRAINER_CONFIG_HYBRID = {
-    "num_generations": 20,
-    "sigma": 0.01,
-    # "sigma_decay": 1,
-    # "sigma_limit": 0,
-    "alpha": 0.001,
-    # "alpha_decay": 0.995,
-    # "alpha_limit": 0,
-    "checkpoint": None,
-    "antithetic": True,
     "state_preprocessor": RunningStandardScaler,
     # "weight_decay": 0.01,
-    "kl_threshold": 0.05,
-    "kl_exploration_factor": 1.0,
+    "kl_threshold": 0.1,
 }
 
 
 # end configs
-
-DETERMINISTIC_ES = False
-ACTION_NOISE = False  # enables deterministc ES with constant noise applied to the actions
 
 
 def reparameterised_act(self, inputs, role):
@@ -205,15 +191,15 @@ def reparameterised_act(self, inputs, role):
         self._log_std = log_std
         self._num_samples = mean_actions.shape[0]
 
-        # use policy learned std for KL calculation
-        policy_std = log_std.exp()
+        # use fixed exploration noise for actions during ES
+        exploration_std = 0.01
+        exploration_tensor = torch.zeros_like(log_std)
+        exploration_tensor += exploration_std
 
         # create a distribution for use with log_prob computation
-        self._distribution = Normal(mean_actions, log_std.exp())
+        self._distribution = Normal(mean_actions, exploration_tensor)
 
-        # use fixed exploration noise for actions during ES
-        # note: this doesnt effect KL calculations as these are done using outputs rather than the log_prob directly
-        exploration_std = 0.01
+        # sample actions using fixed noise
         epsilon = torch.randn_like(mean_actions)
         actions = mean_actions + epsilon * exploration_std
 
@@ -386,7 +372,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
         checkpoint_path = os.path.abspath(args_cli.checkpoint)
 
         if not os.path.exists(checkpoint_path):
-            print(f"Checkpoint file not found")
+            print(f"Checkpoint file not found: {checkpoint_path}")
             return
 
         trainer_config["checkpoint"] = checkpoint_path

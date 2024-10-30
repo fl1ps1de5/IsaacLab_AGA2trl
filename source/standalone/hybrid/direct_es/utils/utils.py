@@ -46,8 +46,6 @@ def compute_weight_decay(weight_decay, model_param_tensor):
     return weight_decay_penalty
 
 
-import torch
-
 # taken from https://github.com/PaoloP84/EfficacyModernES/blob/master/modern_es.py#L511
 
 

@@ -9,6 +9,7 @@ from utils.traininglogger import TrainingLogger
 from utils import utils
 from utils.adam import Adam
 from utils.layerwise_init import LayerwiseInitializer
+from utils.hyperparam_manager import HyperParamManager
 
 from typing import Tuple
 
@@ -18,7 +19,7 @@ import copy
 import os
 import time
 
-SEED = 42
+SEED = 86
 
 
 class CompleteESTrainer(object):
@@ -78,6 +79,7 @@ class CompleteESTrainer(object):
         self.optimiser = Adam(self, stepsize=self.alpha)
         # setuping writer and logger
         self._recording_setup()
+        self.param_manager = HyperParamManager(self)
 
     @torch.no_grad()
     def _init_policy(self, policy):
@@ -103,7 +105,8 @@ class CompleteESTrainer(object):
     def _recording_setup(self) -> None:
         """Sets up logging and writing functionality for trainer"""
         endstring = "_hybrid_torch" if self.hybrid else "_es_torch"
-        log_string = f"seed_{SEED}_alpha_{self.alpha}_sigma_{self.sigma}_kl_{self.kl_threshold}"
+        npop_shorthand = f"{str(self.npop)[0]}k"
+        log_string = f"{npop_shorthand}{SEED}_alpha_{self.alpha}_sigma_{self.sigma}_kl_{self.kl_threshold}_decay_{self.sigma_decay}"
 
         self.log_dir = os.path.join(self.cfg["logdir"], log_string + endstring)
         # initiate writer + save functionality
@@ -143,7 +146,10 @@ class CompleteESTrainer(object):
         self.prior_policy = copy.deepcopy(self.policy)
 
         if self.state_preprocessor is not utils.empty_preprocessor:
-            self.state_preprocessor.load_state_dict(saved_model["state_preprocessor"])
+            try:
+                self.state_preprocessor.load_state_dict(saved_model["state_preprocessor"])
+            except:
+                pass
 
         # update mu to be the current params
         self.mu = self._get_w().to(self.device)
@@ -273,7 +279,7 @@ class CompleteESTrainer(object):
             # scale perturbations based on KL
             scaling_factors = torch.ones(self.npop, device=self.device)
             mask = kl > self.kl_threshold
-            scaling_factors[mask] = self.kl_threshold / kl[mask]
+            scaling_factors[mask] = (self.kl_threshold / kl[mask]) ** 2
             # finally
             scaled_perturbations = self.sigma * (self.symmSamples * scaling_factors.unsqueeze(1))
             self.scaled_symmSamples = scaled_perturbations / self.sigma  # store for update later
@@ -285,8 +291,14 @@ class CompleteESTrainer(object):
     def _calculate_kl_divergence(self, prior_outputs, current_outputs):
         prior_log_std = self.prior_policy.state_dict()["log_std_parameter"]
         current_log_std = self.policy.state_dict()["log_std_parameter"]
+
+        exploration_std = 0.01
+        exploation_tensor = torch.zeros_like(prior_log_std)
+        exploation_tensor += exploration_std
+
         prior_actions_dist = Normal(prior_outputs["mean_actions"], prior_log_std.exp())
         current_actions_dist = Normal(current_outputs["mean_actions"], current_log_std.exp())
+
         kl = kl_divergence(current_actions_dist, prior_actions_dist).mean(dim=1)
         print(f"Avg KL Divergence: {kl.mean().item()}")
         return kl
@@ -420,15 +432,8 @@ class CompleteESTrainer(object):
 
     def _post_generation(self, step, mean_reward):
         # implementation details
-
-        # grow kl_threshold
-        self.kl_threshold *= self.cfg.get("kl_exploration_factor", 1)
-
-        # load mu into self.policy for KL divergence calculations
-        self._load_flat_params(self.mu)
-        # update comparitive policy every some generations to encourage more exploration
-        if self.current_generation % self.cfg.get("update_ref_policy_gen", 100) == 0:
-            vector_to_parameters(self.mu, self.prior_policy.parameters())
+        # self.param_manager.transition_parameters()
+        # self.param_manager.begin_exploring()
 
         # logging details
 

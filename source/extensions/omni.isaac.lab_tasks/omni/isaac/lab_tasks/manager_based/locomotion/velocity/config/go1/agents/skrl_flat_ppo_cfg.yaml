@@ -1,4 +1,4 @@
-seed: 42
+seed: 86
 
 
 # Models are instantiated using skrl's model instantiator utility
@@ -49,7 +49,7 @@ agent:
   learning_rate_scheduler: KLAdaptiveLR
   learning_rate_scheduler_kwargs:
     kl_threshold: 0.01
-  state_preprocessor: null
+  state_preprocessor: RunningStandardScaler
   state_preprocessor_kwargs: null
   value_preprocessor: null
   value_preprocessor_kwargs: null
@@ -69,7 +69,7 @@ agent:
     directory: "unitree_go1_flat"
     experiment_name: ""
     write_interval: auto
-    checkpoint_interval: auto
+    checkpoint_interval: 600 # auto - changed to 500 to obtain a 1500 checkpoint
 
 
 # Sequential trainer
