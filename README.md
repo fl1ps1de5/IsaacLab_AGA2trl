@@ -10,7 +10,7 @@ Anyways, looking to fix that at some point, but thought it was worth the warning
 
 # What is this?
 
-This is a fork of [IsaacLab]([url](https://github.com/isaac-sim/IsaacLab)). For details on what _that_ is, please check out the link.
+This is a fork of [IsaacLab](https://github.com/isaac-sim/IsaacLab). For details on what _that_ is, please check out the link.
 
 # Why does it exist?
 
