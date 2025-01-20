@@ -1,0 +1,13 @@
+ant:
+  hybrid:
+    num_generations: 6
+    sigma: 0.025
+    sigma_decay: 0.95
+    sigma_limit: 0.005
+    alpha: 0.005
+    checkpoint: null
+    antithetic: true
+    state_preprocessor: RunningStandardScaler
+    kl_threshold: 0.1
+
+    

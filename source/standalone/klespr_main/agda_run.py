@@ -84,125 +84,8 @@ import omni.isaac.lab_tasks  # noqa: F401
 from omni.isaac.lab_tasks.utils.wrappers.skrl import SkrlVecEnvWrapper
 from omni.isaac.lab_tasks.utils.hydra import hydra_task_config
 
-from es_trainer_dated import ESTrainerDated
-from es_trainer_current import ESTrainer
 from es_trainer_complete import CompleteESTrainer
-
-from utils.scheduler import AdaptiveScheduler
-
-# begin configs
-# define traininer configs - will be moved outside of this file
-CARTPOLE_TRAINER_CONFIG_ES = {
-    "num_generations": 10,
-    "max_timesteps": None,
-    "sigma": 0.05,
-    # "sigma_decay": 0.999,
-    # "sigma_limit": 0.01,
-    "alpha": 0.1,
-    # "alpha_decay": 0.9999,
-    # "alpha_limit": 0.001,
-    "checkpoint": None,
-    "antithetic": True,
-    # "state_preprocessor": RunningStandardScaler,
-}
-
-CARTPOLE_TRAINER_CONFIG_HYBRID = {  # FINALIZERD
-    "num_generations": 7,
-    # "max_timesteps": 2100,
-    "sigma": 0.05,
-    # "sigma_decay": 1,
-    # "sigma_limit": 0.01,
-    "alpha": 0.05,
-    # "alpha_decay": 1,
-    # "alpha_limit": 0.001,
-    "checkpoint": None,
-    "antithetic": True,
-    "kl_threshold": 0.05,
-}
-
-ANT_TRAINER_CONFIG_ES = {
-    "num_generations": 40,
-    "sigma": 0.05,
-    # "sigma_decay": 1,
-    # "sigma_limit": 0,
-    "alpha": 0.05,
-    # "alpha_decay": 1,
-    # "alpha_limit": 0,
-    "checkpoint": None,
-    "antithetic": True,
-    "state_preprocessor": RunningStandardScaler,
-    # "weight_decay": 1,
-    # "rewards_shaper_scale": 0.6,
-}
-
-ANT_TRAINER_CONFIG_HYBRID = {  # FINALIZED
-    "num_generations": 6,
-    "sigma": 0.025,
-    "sigma_decay": 0.95,
-    "sigma_limit": 0.005,
-    "alpha": 0.005,
-    "checkpoint": None,
-    "antithetic": True,
-    "state_preprocessor": RunningStandardScaler,
-    # "kl_threshold": 0.1,
-}
-
-VELOCITY_TRAINER_CONFIG_HYBRID = {
-    "num_generations": 50,
-    "max_timesteps": 4000,
-    "sigma": 0.02,
-    # "sigma_decay": 0.99,
-    # "sigma_limit": 0.005,
-    "alpha": 0.01,
-    "checkpoint": None,
-    "antithetic": True,
-    "kl_threshold": 0.05,
-    "transition_gen": 1,
-    # "state_preprocessor": RunningStandardScaler,
-}
-
-REACH_TRAINER_CONFIG_HYBRID = {
-    "num_generations": 50,
-    "max_timesteps": 5400,
-    "sigma": 0.015,
-    "sigma_decay": 0.75,
-    "sigma_limit": 0.01,
-    "alpha": 0.005,
-    "checkpoint": None,
-    "antithetic": True,
-    "state_preprocessor": RunningStandardScaler,
-    "kl_threshold": 0.1,
-    "transition_gen": 1,
-}
-
-LIFT_TRAINER_CONFIG_HYBRID = {  # by 2k need > 70
-    "num_generations": 30,
-    "sigma": 0.02,
-    "sigma_decay": 0.95,
-    "sigma_limit": 0.005,
-    "alpha": 0.005,
-    "checkpoint": None,
-    "antithetic": True,
-    "state_preprocessor": RunningStandardScaler,
-    "kl_threshold": 0.05,
-    "transition_gen": 5,
-}
-
-HUMANOID_TRAINER_CONFIG_HYBRID = {  #
-    "num_generations": 50,
-    "max_timesteps": 10400,
-    "sigma": 0.025,
-    "sigma_decay": 0.95,
-    "sigma_limit": 0.005,
-    "alpha": 0.005,
-    "checkpoint": None,
-    "antithetic": True,
-    "state_preprocessor": RunningStandardScaler,
-    "kl_threshold": 0.1,
-}
-
-
-# end configs
+from utils.config_loader import load_config, ConfigLoadError
 
 
 def reparameterised_act(self, inputs, role):
@@ -385,28 +268,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
     # )
 
     # determine custom trainer config
-    task_name = args_cli.task.split("-")[1].upper()
-
-    # obtain config based on policy
-    config_type = "HYBRID" if args_cli.hybrid else "ES"
-
-    # obtain trainer config
-    config_name = f"{task_name}_TRAINER_CONFIG_{config_type}"
+    task_name = args_cli.task.split("-")[1].lower()
+    config_type = "hybrid" if args_cli.hybrid else "es"
 
     # load the trainer config based on task name
     try:
-        trainer_config = getattr(sys.modules[__name__], config_name)
-    except AttributeError:
-        raise ValueError(f"No config found for task: {task_name}")
+        trainer_config = load_config(task_name, config_type)
+    except ConfigLoadError as e:
+        print(f"Error loading configuration: {e}")
+        simulation_app.close()
+        return
 
     # give checkpoint path if we need it
     if args_cli.checkpoint:
         checkpoint_path = os.path.abspath(args_cli.checkpoint)
-
         if not os.path.exists(checkpoint_path):
             print(f"Checkpoint file not found: {checkpoint_path}")
+            simulation_app.close()
             return
-
         trainer_config["checkpoint"] = checkpoint_path
 
     # define trainer log
@@ -432,7 +311,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
     print("Training policy with following structure: ")
     print(policy)
     print(f"Policy training to complete {task_name} task")
-    print(f"Training policy with config: '{config_name}'")
     print(f"{trainer_config}\n")
 
     # check if we should test
