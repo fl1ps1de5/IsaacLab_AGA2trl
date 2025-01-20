@@ -349,6 +349,7 @@ class CompleteESTrainer(object):
         current_log_std = self.policy.state_dict()["log_std_parameter"]
 
         exploration_std = 0.01
+        # TYPO HERE - needs investigation
         exploation_tensor = torch.zeros_like(prior_log_std)
         exploation_tensor += exploration_std
 
