@@ -8,8 +8,6 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from utils.traininglogger import TrainingLogger
 from utils import utils
 from utils.adam import Adam
-from utils.layerwise_init import LayerwiseInitializer
-from utils.hyperparam_manager import HyperParamManager
 
 from typing import Tuple
 
@@ -18,12 +16,11 @@ import time
 import copy
 import os
 import time
-import collections
 
 SEED = 86
 
 
-class CompleteESTrainer(object):
+class ESTrainer(object):
     """
     Class which contains main training loop and associated
     """
@@ -42,19 +39,16 @@ class CompleteESTrainer(object):
         self.max_timesteps = self.cfg.get("max_timesteps", None)
         # define training hyperparameters
         self.sigma = self.cfg.get("sigma", 0.1)
-        self.sigma_decay = self.cfg.get("sigma_decay", 1)
+        self.sigma_decay = self.cfg.get("sigma_decay", 0.999)
         self.sigma_limit = self.cfg.get("sigma_limit", 0)
         self.alpha = self.cfg.get("alpha", 0.01)
-        self.alpha_decay = self.cfg.get("alpha_decay", 1)
+        self.alpha_decay = self.cfg.get("alpha_decay", 0.9999)
         self.alpha_limit = self.cfg.get("alpha_limit", 0)
         self.kl_threshold = self.cfg.get("kl_threshold", 0)
         self.weight_decay = self.cfg.get("weight_decay", 0)
         self.antithetic = self.cfg.get("antithetic", False)
         # env hyperparameters
         self.npop = env.num_envs
-        # pre-allocate tracking tensors
-        self.sum_rewards = torch.zeros(self.npop, device=self.device)
-        self.all_dones = torch.zeros(self.npop, dtype=torch.bool, device=self.device)
         # obtain testing / hybrid checkpoint
         self.checkpoint = self.cfg.get("checkpoint", None)
         self.hybrid = self.cfg.get("hybrid", False)
@@ -65,25 +59,26 @@ class CompleteESTrainer(object):
         # track best values
         self.best_mu = None
         self.best_reward = float("-inf")
+        self.tbr = float("-inf")
+        self.twr = float("inf")
         # rewards shaper
         self.rewards_shaper = cfg["rewards_shaper"]
         # initialise mu
         if self.checkpoint is None:  # initalise mu to pretrained otherwise
-            init_method = 1
+            init_method = 0
             if init_method == 0:
                 self.mu = torch.zeros(self.num_params, device=self.device)
             elif init_method == 1:
-                self.mu = LayerwiseInitializer.initialize_flat_params(self.policy)
-            self._load_flat_params(self.mu)
+                self.mu = torch.randn(self.num_params, device=self.device) * 0.01
+            elif init_method == 2:
+                self.mu = parameters_to_vector(self.policy.parameters()).to(self.device)
         # hybrid init
         else:
             self._checkpoint_setup()
-
         # intiialise optimiser
         self.optimiser = Adam(self, stepsize=self.alpha)
         # setuping writer and logger
         self._recording_setup()
-        self.param_manager = HyperParamManager(self)
 
     @torch.no_grad()
     def _init_policy(self, policy):
@@ -109,8 +104,7 @@ class CompleteESTrainer(object):
     def _recording_setup(self) -> None:
         """Sets up logging and writing functionality for trainer"""
         endstring = "_hybrid_torch" if self.hybrid else "_es_torch"
-        npop_shorthand = f"{str(self.npop)[0]}k"
-        log_string = f"TT_{npop_shorthand}{SEED}_alpha_{self.alpha}_sigma_{self.sigma}_kl_{self.kl_threshold}_decay_{self.sigma_decay}"
+        log_string = f"seed_{SEED}_alpha_{self.alpha}_sigma_{self.sigma}"
 
         self.log_dir = os.path.join(self.cfg["logdir"], log_string + endstring)
         # initiate writer + save functionality
@@ -127,7 +121,6 @@ class CompleteESTrainer(object):
             env_seed=self.env.seed,
             num_gens=self.num_gens,
             max_timesteps=self.max_timesteps,
-            kl_threshold=self.kl_threshold,
             sigma=self.sigma,
             sigma_decay=self.sigma_decay,
             sigma_limit=self.sigma_limit,
@@ -151,10 +144,7 @@ class CompleteESTrainer(object):
         self.prior_policy = copy.deepcopy(self.policy)
 
         if self.state_preprocessor is not utils.empty_preprocessor:
-            try:
-                self.state_preprocessor.load_state_dict(saved_model["state_preprocessor"])
-            except:
-                pass
+            self.state_preprocessor.load_state_dict(saved_model["state_preprocessor"])
 
         # update mu to be the current params
         self.mu = self._get_w().to(self.device)
@@ -162,12 +152,10 @@ class CompleteESTrainer(object):
     def _get_w(self) -> torch.Tensor:
         """Sets the policy parameters to a vector "mu" and returns it
 
-        Note we ensure that only "trainable" parameters are included in the vector
-
         Returns:
             torch.tensor: the flat parameters of trainer policy
         """
-        return parameters_to_vector([p for p in self.policy.parameters() if p.requires_grad])
+        return parameters_to_vector(self.policy.parameters())
 
     def _get_num_params(self) -> int:
         """Count number of parameters in policy network
@@ -175,7 +163,8 @@ class CompleteESTrainer(object):
         Returns:
             int: number of parameters in policy  network
         """
-        return sum(p.numel() for p in self.policy.parameters() if p.requires_grad)
+        w = parameters_to_vector(self.policy.parameters())
+        return w.shape[0]
 
     def _get_model_arch(self):
         """Obtain copy of model, and move it to meta device.
@@ -185,7 +174,7 @@ class CompleteESTrainer(object):
         model_arch = model_arch.to("meta")
         return model_arch
 
-    def _reshape_params(self, pop_w: torch.Tensor) -> dict:
+    def _reshape_params(self):
         """Reshapes the population parameters (generated by generate_population) into a dictionary
         with suitable shape to be vectorsied. More specifically the shape is appropraite for pytorch functional_call
         """
@@ -197,7 +186,7 @@ class CompleteESTrainer(object):
             new_shape = (self.npop,) + param.size()
             end_index = start_index + param_size
 
-            params_dict[name] = pop_w[:, start_index:end_index].reshape(new_shape).to(self.device)
+            params_dict[name] = self.pop_w[:, start_index:end_index].reshape(new_shape).to(self.device)
 
             start_index = end_index
 
@@ -247,270 +236,241 @@ class CompleteESTrainer(object):
             return actions
 
     @torch.no_grad()
-    def _generate_population(self) -> torch.Tensor:
+    def _generate_population(self) -> None:
         """Generate a population of candidate parameters by applying noise to self.mu
-
-        Here we also implement trust regions in a novel way, by calculating the kl divergence
-        of the candidate population before evaluation and scaling it down when necessary.
 
         self.pop_w has shape [npop, num_params] and is the population of candidate parameters
 
         self.noise is the noise created for this generation
         """
-        samples = torch.randn(self.npop // 2, self.num_params, device=self.device)
+        if self.antithetic:
+            half_npop = self.npop // 2
+            epsilon_half = torch.randn(half_npop, self.num_params, device=self.device)
+            epsilon = torch.cat([epsilon_half, -epsilon_half], dim=0)
+        else:
+            epsilon = torch.randn(self.npop, self.num_params, device=self.device)
 
-        self.symmSamples = torch.zeros(self.npop, self.num_params, device=self.device)
-
-        # for i in range(self.npop // 2):
-        # idx = 2 * i
-        # self.symmSamples[idx] = samples[i]
-        # self.symmSamples[idx + 1] = -samples[i]
-
-        self.symmSamples[: self.npop // 2] = samples
-        self.symmSamples[self.npop // 2 :] = -samples
-
-        pop_w = self.mu.unsqueeze(0) + self.sigma * self.symmSamples
-
-        if self.hybrid and self.kl_threshold > 0:
-            # we are now  going to calculate kl divergence for each perturbation
-            # we will use this kl divergence to scale the perturbations
-            params = self._reshape_params(pop_w)
-            # now lets sample some states
-            states, _ = self.env.reset()
-            states = self.state_preprocessor(states)
-            # obtain current outputs
-            _, _, current_outputs = self._obtain_parallel_actions(states, params, self.model_arch, hybrid=self.hybrid)
-            # obtain outputs using previous policy
-            _, _, prior_outputs = self.prior_policy.act({"states": states}, role="policy")
-            # now
-            kl = self._calculate_kl_divergence(prior_outputs, current_outputs)
-            # scale perturbations based on KL
-            scaling_factors = torch.ones(self.npop, device=self.device)
-            mask = kl > self.kl_threshold
-            scaling_factors[mask] = self.kl_threshold / kl[mask]
-            # finally
-            scaled_perturbations = self.sigma * (self.symmSamples * scaling_factors.unsqueeze(1))
-            self.scaled_symmSamples = scaled_perturbations / self.sigma  # store for update later
-            pop_w = self.mu.unsqueeze(0) + scaled_perturbations
-
-        return pop_w
+        self.noise = epsilon * self.sigma
+        self.pop_w = self.mu.reshape(1, self.num_params) + self.noise
 
     @torch.no_grad()
-    def _generate_population_fast(self) -> torch.Tensor:
-        """Generate population using CPU memory as buffer for large tensors"""
-        # Generate samples on CPU
-        samples = torch.randn(self.npop // 2, self.num_params, device="cpu")
+    def evaluate_unperturbed(self):
+        """
+        Evaluates the unperturbed policy (self.mu) using the same 4096 environments.
+        This function assumes that the perturbed population has already been evaluated
+        and that the environments are reset for a new evaluation of the unperturbed policy.
+        """
+        # Reset the environments for the unperturbed evaluation
+        states, _ = self.env.reset()  # Same 4096 environments
 
-        # Keep symmSamples on CPU until needed
-        self.symmSamples = torch.zeros(self.npop, self.num_params, device="cpu")
-        self.symmSamples[: self.npop // 2] = samples
-        self.symmSamples[self.npop // 2 :] = -samples
-        del samples
+        # Expand the unperturbed parameters (self.mu) to match the environment size
+        params = {
+            name: param.unsqueeze(0).expand(self.npop, *param.shape).to(self.device)
+            for name, param in self.policy.named_parameters()
+        }
 
-        # Move to GPU only for the computation
-        symmSamples_gpu = self.symmSamples.to(self.device)
-        pop_w = self.mu.unsqueeze(0) + self.sigma * symmSamples_gpu
-
-        if self.hybrid and self.kl_threshold > 0:
-            states, _ = self.env.reset()
-            states = self.state_preprocessor(states)
-
-            params = {}
-            start_index = 0
-            for name, param in self.model_arch.named_parameters():
-                param_size = param.numel()
-                new_shape = (self.npop,) + param.size()
-                end_index = start_index + param_size
-                params[name] = pop_w[:, start_index:end_index].reshape(new_shape)
-                start_index = end_index
-
-            _, _, current_outputs = self._obtain_parallel_actions(states, params, self.model_arch, hybrid=self.hybrid)
-            _, _, prior_outputs = self.prior_policy.act({"states": states}, role="policy")
-
-            kl = self._calculate_kl_divergence(prior_outputs, current_outputs)
-
-            scaling_factors = torch.ones(self.npop, device=self.device)
-            mask = kl > self.kl_threshold
-            scaling_factors[mask] = self.kl_threshold / kl[mask]
-
-            # Store scaled samples on CPU
-            self.scaled_symmSamples = (symmSamples_gpu * scaling_factors.unsqueeze(1)).cpu()
-            scaled_perturbations = self.sigma * self.scaled_symmSamples.to(self.device)
-            pop_w = self.mu.unsqueeze(0) + scaled_perturbations
-
-            del symmSamples_gpu, scaling_factors, params, current_outputs, prior_outputs, kl
-            torch.cuda.empty_cache()
-
-        return pop_w
-
-    @torch.no_grad()
-    def _calculate_kl_divergence(self, prior_outputs, current_outputs):
-        prior_log_std = self.prior_policy.state_dict()["log_std_parameter"]
-        current_log_std = self.policy.state_dict()["log_std_parameter"]
-
-        exploration_std = 0.01
-        exploation_tensor = torch.zeros_like(prior_log_std)
-        exploation_tensor += exploration_std
-
-        prior_actions_dist = Normal(prior_outputs["mean_actions"], prior_log_std.exp())
-        current_actions_dist = Normal(current_outputs["mean_actions"], current_log_std.exp())
-
-        kl = kl_divergence(current_actions_dist, prior_actions_dist).mean(dim=1)
-        print(f"Avg KL Divergence: {kl.mean().item()}")
-        return kl
-
-    @torch.no_grad()
-    def _evaluate_population(self):
-        """Generates and evaluates a population of parameter vectors by perturbing mu"""
-        # Step 1: Generate population
-        pop_w = self._generate_population_fast()
-
-        # Step 2: Evaluate population
-        total_rewards = torch.zeros(self.npop, device=self.device)
-
-        for trial in range(self.cfg.get("ntrials", 1)):
-            if self.hybrid:
-                rewards = self._rollout_population_hybrid(pop_w)
-            else:
-                rewards, _ = self._rollout_population_es(pop_w)
-            total_rewards += rewards
-
-        avg_rewards = total_rewards / self.cfg.get("ntrials", 1)
-
-        # Step 3: return the average rewards over trials
-        return avg_rewards
-
-    @torch.no_grad()
-    def _rollout_population_es(self, pop_w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Rollout the population through the environment and obtain summed rewards"""
         all_dones = torch.zeros(self.npop, dtype=torch.bool, device=self.device)
         sum_rewards = torch.zeros(self.npop, device=self.device)
 
-        states, _ = self.env.reset()
-        params = self._reshape_params(pop_w)
+        generation_steps = 0
 
         while not all_dones.all():
-            states = self.state_preprocessor(states, train=True)
-            actions = self._obtain_parallel_actions(states, params, self.model_arch, hybrid=False)
+            states = self.state_preprocessor(states)
+
+            # Get actions using the unperturbed parameters
+            if self.hybrid:
+                actions, _, _ = self._obtain_parallel_actions(
+                    states=states,
+                    params=params,
+                    base_model=self.model_arch,
+                    hybrid=self.hybrid,
+                )
+            else:
+                actions = self._obtain_parallel_actions(
+                    states=states,
+                    params=params,
+                    base_model=self.model_arch,
+                    hybrid=self.hybrid,
+                )
+
+            # Step the environment with the unperturbed actions
             next_states, rewards, terminated, truncated, infos = self.env.step(actions)
-            self.current_timestep += 1
             sum_rewards += rewards.squeeze()
+
             dones = torch.bitwise_or(terminated, truncated)
             all_dones = torch.bitwise_or(all_dones, dones.squeeze())
+
+            generation_steps += 1
             states = next_states
 
-        return sum_rewards, all_dones
+        # Return the accumulated rewards for the unperturbed evaluation
+        return {
+            "sum_rewards": sum_rewards.mean().item(),  # Use mean reward across all environments
+            "generation_steps": generation_steps,
+        }
 
     @torch.no_grad()
-    def _rollout_population_hybrid(self, pop_w: torch.Tensor) -> torch.Tensor:
-        """Rollout the population through the environment and obtain summed rewards and KL.
-        We obtain KL data as a way to manage policy updates"""
-        assert self.hybrid is True, "Hybrid flag must be set to True to use this method"
+    def _evaluate(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Evaluates the current population weights within the simulation, in parallel
+        """
+        # count steps in generation
+        generation_steps = 0
+        # initalise storage for generation information
+        all_dones = torch.zeros(self.npop, dtype=torch.bool, device=self.device)
+        sum_rewards = torch.zeros(self.npop).to(self.device)
+        # store kl divergence for each candidate parameter vector
+        pop_kl_divergences = torch.zeros(self.npop).to(self.device)
 
-        self.all_dones.zero_()
-        self.sum_rewards.zero_()
-
+        params = self._reshape_params()
         states, _ = self.env.reset()
-        params = self._reshape_params(pop_w)
-
-        while not self.all_dones.all():
-            states = self.state_preprocessor(states, train=True)
-            actions, log_prob, outputs = self._obtain_parallel_actions(states, params, self.model_arch, hybrid=True)
-
+        while not all_dones.all():
+            states = self.state_preprocessor(states)
+            if self.hybrid:
+                # obtain actions from population
+                actions, log_prob, outputs = self._obtain_parallel_actions(
+                    states=states,
+                    params=params,
+                    base_model=self.model_arch,
+                    hybrid=self.hybrid,
+                )
+                # obtain data from prior policy
+                prior_actions, _, prior_outputs = self.prior_policy.act({"states": states}, role="policy")
+                # calculate KL divergence based on generation log_prob and prior log_prob
+                with torch.no_grad():
+                    prior_log_std = self.prior_policy.state_dict()["log_std_parameter"]
+                    current_log_std = self.policy.state_dict()["log_std_parameter"]
+                    prior_actions_dist = Normal(prior_outputs["mean_actions"], prior_log_std.exp())
+                    current_actions_dist = Normal(outputs["mean_actions"], current_log_std.exp())
+                    kl = kl_divergence(current_actions_dist, prior_actions_dist)
+                    pop_kl_divergences += kl.mean(dim=1)
+            else:
+                # if non-hybrid, then just obtain actions annd proceed
+                actions = self._obtain_parallel_actions(
+                    states=states,
+                    params=params,
+                    base_model=self.model_arch,
+                    hybrid=self.hybrid,
+                )
+            # step environment
             next_states, rewards, terminated, truncated, infos = self.env.step(actions)
-            self.current_timestep += 1
-
+            sum_rewards += rewards.squeeze()
+            # track environments
             dones = torch.bitwise_or(terminated, truncated)
-            self.sum_rewards += rewards.squeeze()
-            self.all_dones = torch.bitwise_or(self.all_dones, dones.squeeze())
+            all_dones = torch.bitwise_or(all_dones, dones.squeeze())
+            # iterate steps in generation
+            generation_steps += 1
+            # count timestep
+            self.current_timestep += 1
+            # obtain next states
             states = next_states
-
-        return self.sum_rewards
-
-    @torch.no_grad()
-    def _compute_update_hybrid(self, fitness):
-
-        # rank the fitness scores in descending order (higher is better)
-        sorted_fitness, indices = torch.sort(fitness, descending=False)
-
-        # assign ranks (0 to npop - 1)
-        ranks = torch.zeros_like(fitness)
-        ranks[indices] = torch.arange(self.npop, device=self.device).type_as(fitness)
-
-        # compute utilities based on ranks
-        utilities = ranks
-        utilities /= self.npop - 1  # normalise ranks to [0, 1]
-        utilities -= 0.5  # Shift to [-0.5, 0.5]
-
-        # ensure utilities have zero mean
-        utilities -= utilities.mean()
-
-        # compute the parameter update using utilities instead of raw fitness
-        # ensure we use the scaled symmetric samples as this is what created the population
-        mu_change = (1.0 / (self.npop * self.sigma)) * torch.matmul(self.symmSamples.T, utilities)
-
-        globalg = -mu_change + 0.005 * self.mu
-
-        self.optimiser.stepsize = self.alpha
-        update_ratio = self.optimiser.update(globalg)
-
-        # decay sigma too
-        self.sigma = max(self.sigma * self.sigma_decay, self.sigma_limit)
+        # divide kl's by steps
+        pop_kl_divergences = pop_kl_divergences / generation_steps
+        return sum_rewards, pop_kl_divergences
 
     @torch.no_grad()
-    def _compute_update_hybrid_fast(self, fitness):
+    def _fitness_shaping(self, rewards):
+        """
+        Rank transform rewards -> reduces the chances
+        of falling into local optima early in training.
+        """
+        lamb = torch.tensor(rewards.size(0), dtype=torch.float32, device=self.device)
+        sorted_rewards, sorted_indices = torch.sort(rewards, descending=True)
+        ranks = torch.argsort(sorted_indices)
+        # compute log terms (add one to ranks to ensure starting at 1)
+        log_term = torch.log2(lamb / 2 + 1) - torch.log2(ranks + 1)
+        shaped_rewards = torch.max(log_term, torch.tensor(0.0, device=self.device))
+        # normalise rewards
+        denom = shaped_rewards.sum()
+        shaped_rewards = shaped_rewards / denom + 1 / lamb
+        # reorder rewards to match original order
+        final_shaped_returns = torch.zeros_like(rewards)
+        final_shaped_returns[sorted_indices] = shaped_rewards
 
-        # rank the fitness scores in descending order (higher is better)
-        sorted_fitness, indices = torch.sort(fitness, descending=False)
+        return final_shaped_returns
 
-        # assign ranks (0 to npop - 1)
-        ranks = torch.zeros_like(fitness)
-        ranks[indices] = torch.arange(self.npop, device=self.device).type_as(fitness)
+    @torch.no_grad()
+    def _weight_update_plain(self, rewards):
+        # map rewards to [-0.5, 0.5]
+        # rewards = utils.compute_centered_ranks(rewards)
+        rewards = self._fitness_shaping(rewards)
+        # # avoid zero division
+        # assert rewards.std() != 0, "Rewards should not have zero variance"
+        # # # normalise rewards
+        # rewards = (rewards - rewards.mean()) / rewards.std()
 
-        # compute utilities based on ranks
-        utilities = ranks
-        utilities /= self.npop - 1  # normalise ranks to [0, 1]
-        utilities -= 0.5  # Shift to [-0.5, 0.5]
+        # apply weight decay
+        if self.weight_decay > 0:
+            l2_decay = utils.compute_weight_decay(self.weight_decay, self.pop_w)
+            rewards += l2_decay
 
-        # ensure utilities have zero mean
-        utilities -= utilities.mean()
+        # compute mu change & gradient
+        mu_change = (1.0 / (self.npop * self.sigma)) * torch.matmul(self.noise.T, rewards)
 
-        # Move symmSamples to GPU only for matmul
-        symmSamples_gpu = self.symmSamples.to(self.device)
-
-        # compute the parameter update using utilities instead of raw fitnes
-        mu_change = (1.0 / (self.npop * self.sigma)) * torch.matmul(symmSamples_gpu.t(), utilities)
-        del symmSamples_gpu
-
-        # compute the parameter update using utilities instead of raw fitness
-        globalg = -mu_change + 0.005 * self.mu
-
+        # step optimiser
         self.optimiser.stepsize = self.alpha
-        update_ratio = self.optimiser.update(globalg)
+        update_ratio = self.optimiser.update(-mu_change)
 
-        # decay sigma too
-        self.sigma = max(self.sigma * self.sigma_decay, self.sigma_limit)
+        # decay hyper params
+        if self.sigma > self.sigma_limit:
+            self.sigma *= self.sigma_decay
+        # decay alpha
+        if self.alpha > self.alpha_limit:
+            self.alpha *= self.alpha_decay
 
-        del mu_change, globalg
-        torch.cuda.empty_cache()
+    @torch.no_grad()
+    def _weight_update_with_trust_region(self, rewards, pop_kl_divergences):
+        kl_divergence = pop_kl_divergences.mean()
 
-    def _compute_update_es(self, fitness):
-        fitness = (fitness - fitness.mean()) / (fitness.std() + 1e-8)
+        rewards = self._fitness_shaping(rewards)
 
-        mu_change = (1.0 / (self.npop * self.sigma)) * torch.matmul(self.symmSamples.T, fitness)
+        # weight decay
+        if self.weight_decay > 0:
+            l2_decay = utils.compute_weight_decay(self.weight_decay, self.pop_w)
+            rewards += l2_decay
 
-        globalg = -mu_change
+        # 2. compute mu change
+        mu_change = (1.0 / (self.npop * self.sigma + 1e-8)) * torch.matmul(self.noise.T, rewards)
+        gradient = -mu_change
 
+        # 3. implement trust region
+        proposed_update = gradient
+        if kl_divergence > self.kl_threshold:
+            scaling_factor = torch.sqrt(self.kl_threshold / kl_divergence)
+            proposed_update *= scaling_factor
+
+        # 4. assign gradient to mu and step optimiser
         self.optimiser.stepsize = self.alpha
-        update_ratio = self.optimiser.update(globalg)
+        update_ratio = self.optimiser.update(proposed_update)
+
+        # 5. adaptive sigma based on kl divergence
+        # if kl_divergence <= self.kl_threshold:
+        #     self.sigma = min(self.sigma * 1.1, self.cfg["sigma"])
+        # elif kl_divergence > self.kl_threshold:
+        #     self.sigma = max(self.sigma * 0.9, self.sigma_limit)
+
+        if self.current_generation > 1:
+            self.sigma = 0.007
+            self.alpha = 0.005
+
+        # 7. decay alpha
+        if self.alpha > self.alpha_limit:
+            self.alpha *= self.alpha_decay
+
+        # after a few generations compare current mu to previous mu from ES
+        if self.current_generation % 3:  # this take effect for the fourth generation
+            vector_to_parameters(self.mu, self.prior_policy.parameters())
 
     def _update_tracking_data(self, rewards, gen):
-
         self.tracking_data.update(
             {
                 "Reward / Total reward (mean)": torch.mean(rewards).item(),
                 "Reward / Total reward (max)": torch.max(rewards).item(),
                 "Reward / Total reward (min)": torch.min(rewards).item(),
+                "Action / Mean action": torch.mean(self.pop_w).item(),
+                "Action / Std action": torch.std(self.pop_w).item(),
+                "Action / Max action": torch.max(self.pop_w).item(),
+                "Action / Min action": torch.min(self.pop_w).item(),
                 "Parameters / Mean": torch.mean(self.mu).item(),
                 "Parameters / Std": torch.std(self.mu).item(),
                 "Parameters / Max": torch.max(self.mu).item(),
@@ -524,12 +484,6 @@ class CompleteESTrainer(object):
         )
 
     def _post_generation(self, step, mean_reward):
-        # # implementation details
-        transiton_gen = self.cfg.get("transition_gen", None)
-        if transiton_gen and self.current_generation > transiton_gen:
-            self.param_manager.grow_kl()
-
-        # logging details
         self._write_to_tensorboard(step)
         # save model every so often
         if self.current_generation % self.save_interval == 0 or self.current_generation == self.num_gens - 1:
@@ -547,11 +501,8 @@ class CompleteESTrainer(object):
         self.logger.update_generations(self.current_generation + 1)
 
     def _write_to_tensorboard(self, step: float) -> None:
-
         for tag, value in self.tracking_data.items():
-            if not tag.startswith("Window /"):
-                self.writer.add_scalar(tag, value, step)
-
+            self.writer.add_scalar(tag, value, step)
         self.writer.flush()
 
     def _load_flat_params(self, flat_params):
@@ -569,7 +520,7 @@ class CompleteESTrainer(object):
 
         save_dict = {
             "policy": self.policy.state_dict(),
-            # "state_preprocessor": self.state_preprocessor.state_dict(),  # COMMENT OUT WHEN RUNNING ES
+            "state_preprocessor": self.state_preprocessor.state_dict(),  # COMMENT OUT WHEN RUNNING ES
             "mu": self.mu if identifier != "best" else self.best_mu,
             "sigma": self.sigma,
             "alpha": self.alpha,
@@ -591,32 +542,60 @@ class CompleteESTrainer(object):
         for gen in range(self.num_gens):
             # training loop
             it_time = time.time()
+            # perturb mu to generate population
+            self._generate_population()
             # evaluate population in environment
-            fitness = self._evaluate_population()
+            rewards, pop_kl_divergences = self._evaluate()
+
+            """# leave this here for debugging and logging, but NOT used in main code
+            # unpertrubed_reward = self.evaluate_unperturbed()["sum_rewards"]"""
+
+            # shape rewards
+            shaped_rewards = self.rewards_shaper(rewards)
+
             # perform update
-            if self.hybrid:
-                self._compute_update_hybrid_fast(fitness)
+            if self.hybrid:  # this means we compute 3 updates using trust regions
+                self._weight_update_with_trust_region(shaped_rewards, pop_kl_divergences)
             else:
-                self._compute_update_es(fitness)
+                self._weight_update_plain(shaped_rewards)
+
             # update training data
-            self._update_tracking_data(rewards=fitness, gen=gen)
+            self._update_tracking_data(rewards=rewards, gen=gen)
+
             # obtain mean reward from tracked data
-            mean_reward = fitness.mean().item()
+            mean_reward = self.tracking_data["Reward / Total reward (mean)"]
+            # update trackers (for hyperparam tuning)
+            old_best = self.tbr
+            self.tbr = max(self.tbr, mean_reward)
+            old_worst = self.twr
+            self.twr = min(self.twr, mean_reward)
+
+            if old_best != self.tbr:
+                best_track[gen] = mean_reward
+            if old_worst != self.twr:
+                worst_track[gen] = mean_reward
+
             # print generation results
             print(
                 f"Generation {self.current_generation}: Reward: {mean_reward:.2f}, "
                 f"Timesteps: {self.current_timestep}, Time: {time.time() - it_time:.2f}, "
+                f"KL: {pop_kl_divergences.mean().item():.2f}"
             )
+
             self._post_generation(step=self.current_timestep, mean_reward=mean_reward)
+
             # if we are terminating after a certain amount of timesteps, then do so
             if self.max_timesteps:
                 if self.current_timestep >= self.max_timesteps:
                     break
+
             self.current_generation += 1
 
         training_time = time.time() - start_time
         print("==========Training finished==========")
         print(f"Training time: {training_time:.2f} seconds")
+        print(f"Best reward: {self.tbr}")
+        print(f"Worst reward: {self.twr}")
 
         self.logger.finalize()
 
@@ -628,6 +607,7 @@ class CompleteESTrainer(object):
         Testing loop using specified checkpoint - simply evaluates model
         """
         print("========Start Testing========")
+        start_time = time.time()
 
         assert self.checkpoint is not None
 

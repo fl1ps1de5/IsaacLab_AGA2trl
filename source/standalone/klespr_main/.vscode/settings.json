@@ -1,0 +1,9 @@
+{
+    "workbench.colorCustomizations": {
+        "tree.indentGuidesStroke": "#0055ff",
+        "tab.activeBorder": "#00ff00",
+        "activityBar.background": "#471758",
+        "titleBar.activeBackground": "#63207B",
+        "titleBar.activeForeground": "#FDFAFE"
+    }
+}
