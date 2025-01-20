@@ -1,62 +1,29 @@
-![Isaac Lab](docs/source/_static/isaaclab.jpg)
+# Before I Begin, - A Warning!!!
 
----
+The code that is present in this fork/repo, is not _production_ quality code... at least not at the moment. Changes have been made to various files, and the commit messages have not been super thoughtful. Also, there's a lot of bloat - i.e. files that aren't needed for the exact point of **my** project, and files that I created for my project that I never ended up using. 
 
-# Isaac Lab
+That is true at least for the current moment in time (Nov 2024). 
 
-[![IsaacSim](https://img.shields.io/badge/IsaacSim-4.2.0-silver.svg)](https://docs.omniverse.nvidia.com/isaacsim/latest/overview.html)
-[![Python](https://img.shields.io/badge/python-3.10-blue.svg)](https://docs.python.org/3/whatsnew/3.10.html)
-[![Linux platform](https://img.shields.io/badge/platform-linux--64-orange.svg)](https://releases.ubuntu.com/20.04/)
-[![Windows platform](https://img.shields.io/badge/platform-windows--64-orange.svg)](https://www.microsoft.com/en-us/)
-[![pre-commit](https://img.shields.io/github/actions/workflow/status/isaac-sim/IsaacLab/pre-commit.yaml?logo=pre-commit&logoColor=white&label=pre-commit&color=brightgreen)](https://github.com/isaac-sim/IsaacLab/actions/workflows/pre-commit.yaml)
-[![docs status](https://img.shields.io/github/actions/workflow/status/isaac-sim/IsaacLab/docs.yaml?label=docs&color=brightgreen)](https://github.com/isaac-sim/IsaacLab/actions/workflows/docs.yaml)
-[![License](https://img.shields.io/badge/license-BSD--3-yellow.svg)](https://opensource.org/licenses/BSD-3-Clause)
+That being said, the actual functionality of this code (particularly `es_trainer_complete.py` & `agda_run.py`) is proven (see bottom of read me), and works as intended. However, I have not documented exactly how the files should/can be used, and the actual functionality of the scripts depends on a workflow that is not setup to be automatic (i.e. some manual operations must be done before the files are usable). 
 
+Anyways, looking to fix that at some point, but thought it was worth the warning...
 
-**Isaac Lab** is a unified and modular framework for robot learning that aims to simplify common workflows
-in robotics research (such as RL, learning from demonstrations, and motion planning). It is built upon
-[NVIDIA Isaac Sim](https://docs.omniverse.nvidia.com/isaacsim/latest/overview.html) to leverage the latest
-simulation capabilities for photo-realistic scenes and fast and accurate simulation.
+# What is this?
 
-Please refer to our [documentation page](https://isaac-sim.github.io/IsaacLab) to learn more about the
-installation steps, features, tutorials, and how to set up your project with Isaac Lab.
+This is a fork of [IsaacLab](https://github.com/isaac-sim/IsaacLab). For details on what _that_ is, please check out the link.
 
-## Contributing to Isaac Lab
+# Why does it exist?
 
-We wholeheartedly welcome contributions from the community to make this framework mature and useful for everyone.
-These may happen as bug reports, feature requests, or code contributions. For details, please check our
-[contribution guidelines](https://isaac-sim.github.io/IsaacLab/source/refs/contributing.html).
+I created this fork to allow me to use IsaacLab to work on my undergraduate thesis - "A Study Into Approximate Gradient Descent Alternatives to Deep Reinforcement Learning".
 
-## Troubleshooting
+# How did you use Isaac Lab in your thesis?
 
-Please see the [troubleshooting](https://isaac-sim.github.io/IsaacLab/source/refs/troubleshooting.html) section for
-common fixes or [submit an issue](https://github.com/isaac-sim/IsaacLab/issues).
+Well, because:
 
-For issues related to Isaac Sim, we recommend checking its [documentation](https://docs.omniverse.nvidia.com/app_isaacsim/app_isaacsim/overview.html)
-or opening a question on its [forums](https://forums.developer.nvidia.com/c/agx-autonomous-machines/isaac/67).
+1. I want to brag
+2. It's awesome
+3. I'm lazy
 
-## Support
+, instead of actually writing in depth about what is going on here, I'll just include an excerpt from my thesis.
 
-* Please use GitHub [Discussions](https://github.com/isaac-sim/IsaacLab/discussions) for discussing ideas, asking questions, and requests for new features.
-* Github [Issues](https://github.com/isaac-sim/IsaacLab/issues) should only be used to track executable pieces of work with a definite scope and a clear deliverable. These can be fixing bugs, documentation issues, new features, or general updates.
-
-## License
-
-The Isaac Lab framework is released under [BSD-3 License](LICENSE). The license files of its dependencies and assets are present in the [`docs/licenses`](docs/licenses) directory.
-
-## Acknowledgement
-
-Isaac Lab development initiated from the [Orbit](https://isaac-orbit.github.io/) framework. We would appreciate if you would cite it in academic publications as well:
-
-```
-@article{mittal2023orbit,
-   author={Mittal, Mayank and Yu, Calvin and Yu, Qinxi and Liu, Jingzhou and Rudin, Nikita and Hoeller, David and Yuan, Jia Lin and Singh, Ritvik and Guo, Yunrong and Mazhar, Hammad and Mandlekar, Ajay and Babich, Buck and State, Gavriel and Hutter, Marco and Garg, Animesh},
-   journal={IEEE Robotics and Automation Letters},
-   title={Orbit: A Unified Simulation Framework for Interactive Robot Learning Environments},
-   year={2023},
-   volume={8},
-   number={6},
-   pages={3740-3747},
-   doi={10.1109/LRA.2023.3270034}
-}
-```
+<img width="905" alt="image" src="https://github.com/user-attachments/assets/773fde7c-13d2-435b-8cf4-57280480f508">
