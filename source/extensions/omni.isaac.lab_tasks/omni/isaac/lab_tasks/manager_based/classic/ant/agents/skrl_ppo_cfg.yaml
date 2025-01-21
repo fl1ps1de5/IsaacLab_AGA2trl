@@ -1,4 +1,4 @@
-seed: 86
+seed: 42
 
 
 # Models are instantiated using skrl's model instantiator utility
@@ -69,7 +69,7 @@ agent:
     directory: "ant"
     experiment_name: ""
     write_interval: auto
-    checkpoint_interval: 300 # ETHAN - modified to 300 from auto, to give us more models to use as inital PPO for hybrid
+    checkpoint_interval: auto
 
 
 # Sequential trainer

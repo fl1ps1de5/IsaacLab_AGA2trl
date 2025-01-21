@@ -1,4 +1,4 @@
-seed: 5389
+seed: 42
 
 
 # Models are instantiated using skrl's model instantiator utility
@@ -76,5 +76,5 @@ agent:
 # https://skrl.readthedocs.io/en/latest/api/trainers/sequential.html
 trainer:
   class: SequentialTrainer
-  timesteps: 8000
+  timesteps: 24000
   environment_info: log
