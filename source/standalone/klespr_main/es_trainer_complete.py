@@ -20,7 +20,7 @@ import os
 import time
 import collections
 
-SEED = 86
+SEED = 42
 
 
 class CompleteESTrainer(object):
@@ -99,10 +99,11 @@ class CompleteESTrainer(object):
 
         policy.to(self.device)
 
+        # changed based on 1.4.0
         states, _ = self.env.reset()
         states = self.state_preprocessor(states)
-        policy.act({"states": states}, role="policy")
-        policy.act({"states": states}, role="value")
+        policy.init_state_dict("policy", inputs={"states": states})
+        policy.init_state_dict("value", inputs={"states": states})
 
         return copy.deepcopy(policy)
 
@@ -192,14 +193,29 @@ class CompleteESTrainer(object):
         params_dict = {}
         start_index = 0
 
+        print("Original pop_w shape:", pop_w.shape)
+
         for name, param in self.model_arch.named_parameters():
+
+            # only handle trainable parameters
+            if not param.requires_grad:
+                continue
+
             param_size = param.numel()
             new_shape = (self.npop,) + param.size()
             end_index = start_index + param_size
 
-            params_dict[name] = pop_w[:, start_index:end_index].reshape(new_shape).to(self.device)
+            reshaped = pop_w[:, start_index:end_index].reshape(new_shape).to(self.device)
+            params_dict[name] = reshaped
 
             start_index = end_index
+
+        if "log_std_parameter" in self.policy.state_dict():
+            real_log_std = self.policy.state_dict()["log_std_parameter"]  # e.g. shape [action_dim]
+            # expand so each env / population index sees the same log_std
+            # shape => (self.npop, *real_log_std.shape)
+            expanded_log_std = real_log_std.unsqueeze(0).expand(self.npop, *real_log_std.shape).to(self.device)
+            params_dict["log_std_parameter"] = expanded_log_std
 
         return params_dict
 
@@ -312,17 +328,10 @@ class CompleteESTrainer(object):
         pop_w = self.mu.unsqueeze(0) + self.sigma * symmSamples_gpu
 
         if self.hybrid and self.kl_threshold > 0:
+            params = self._reshape_params(pop_w)
+
             states, _ = self.env.reset()
             states = self.state_preprocessor(states)
-
-            params = {}
-            start_index = 0
-            for name, param in self.model_arch.named_parameters():
-                param_size = param.numel()
-                new_shape = (self.npop,) + param.size()
-                end_index = start_index + param_size
-                params[name] = pop_w[:, start_index:end_index].reshape(new_shape)
-                start_index = end_index
 
             _, _, current_outputs = self._obtain_parallel_actions(states, params, self.model_arch, hybrid=self.hybrid)
             _, _, prior_outputs = self.prior_policy.act({"states": states}, role="policy")
@@ -348,15 +357,10 @@ class CompleteESTrainer(object):
         prior_log_std = self.prior_policy.state_dict()["log_std_parameter"]
         current_log_std = self.policy.state_dict()["log_std_parameter"]
 
-        exploration_std = 0.01
-        # TYPO HERE - needs investigation...
-        exploation_tensor = torch.zeros_like(prior_log_std)
-        exploation_tensor += exploration_std
-
         prior_actions_dist = Normal(prior_outputs["mean_actions"], prior_log_std.exp())
         current_actions_dist = Normal(current_outputs["mean_actions"], current_log_std.exp())
 
-        kl = kl_divergence(current_actions_dist, prior_actions_dist).mean(dim=1)
+        kl = kl_divergence(current_actions_dist, prior_actions_dist).mean(dim=1).squeeze(-1)
         print(f"Avg KL Divergence: {kl.mean().item()}")
         return kl
 

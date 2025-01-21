@@ -75,6 +75,7 @@ from functools import partial
 import copy
 
 from skrl.utils.model_instantiators.torch import shared_model
+from skrl.envs.loaders.torch import load_isaaclab_env
 from skrl.resources.preprocessors.torch.running_standard_scaler import RunningStandardScaler
 
 from omni.isaac.lab.envs import (
@@ -96,24 +97,19 @@ def reparameterised_act(self, inputs, role):
         # clamp log standard deviations
         if self._clip_log_std:
             log_std = torch.clamp(log_std, self._log_std_min, self._log_std_max)
-            # log_std = torch.clamp(log_std, -2.0, 2)
 
         self._log_std = log_std
         self._num_samples = mean_actions.shape[0]
 
-        # use fixed exploration noise for actions during ES
-        exploration_std = 0.01
-        exploration_tensor = torch.zeros_like(log_std)
-        exploration_tensor += exploration_std
-
         # create a distribution for use with log_prob computation
-        self._distribution = Normal(mean_actions, exploration_tensor)
+        std = log_std.exp()
+        self._distribution = Normal(mean_actions, std)
 
         # instead of using a Normal distribution here we want to try with a triangular??
 
-        # sample actions using fixed noise
+        # sample actions deterministically
         epsilon = torch.randn_like(mean_actions)
-        actions = mean_actions  # + epsilon * exploration_std
+        actions = mean_actions
 
         # clip actions
         if self._clip_actions:
@@ -190,24 +186,25 @@ def process_cfg(cfg: dict) -> dict:
     return update_dict(copy.deepcopy(cfg))
 
 
-def initialise_lazy_linear(module, input_shape):
-    for name, child in module.named_children():
-        if isinstance(child, nn.LazyLinear):
-            # forward a dummy input to initialize the lazy layer
-            dummy_input = torch.zeros(1, *input_shape)
-            child(dummy_input)
-        elif isinstance(child, nn.Sequential):
-            # if it's a sequential container, we need to update input_shape as we go
-            for sub_module in child:
-                if isinstance(sub_module, nn.LazyLinear):
-                    dummy_input = torch.zeros(1, *input_shape)
-                    output = sub_module(dummy_input)
-                    input_shape = output.shape[1:]
-                elif hasattr(sub_module, "in_features") and hasattr(sub_module, "out_features"):
-                    input_shape = (sub_module.out_features,)
-        else:
-            # recursively initialise nested modules
-            initialise_lazy_linear(child, input_shape)
+# removed for 1.4.0 update
+# def initialise_lazy_linear(module, input_shape):
+#     for name, child in module.named_children():
+#         if isinstance(child, nn.LazyLinear):
+#             # forward a dummy input to initialize the lazy layer
+#             dummy_input = torch.zeros(1, *input_shape)
+#             child(dummy_input)
+#         elif isinstance(child, nn.Sequential):
+#             # if it's a sequential container, we need to update input_shape as we go
+#             for sub_module in child:
+#                 if isinstance(sub_module, nn.LazyLinear):
+#                     dummy_input = torch.zeros(1, *input_shape)
+#                     output = sub_module(dummy_input)
+#                     input_shape = output.shape[1:]
+#                 elif hasattr(sub_module, "in_features") and hasattr(sub_module, "out_features"):
+#                     input_shape = (sub_module.out_features,)
+#         else:
+#             # recursively initialise nested modules
+#             initialise_lazy_linear(child, input_shape)
 
 
 @hydra_task_config(args_cli.task, "skrl_cfg_entry_point")
@@ -226,10 +223,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
     # note: certain randomization occur in the environment initialization so we set the seed here
     env_cfg.seed = args_cli.seed if args_cli.seed is not None else cfg["seed"]
 
-    # create environment
+    # # create environment
     env = gym.make(args_cli.task, cfg=env_cfg, is_finite_horizon=False)
 
-    # wrap environemtn with skrl wrapper for use with shared_model
+    # # wrap environemtn with skrl wrapper for use with shared_model
     skrl_env = SkrlVecEnvWrapper(env, ml_framework=args_cli.ml_framework)
 
     # remove 'class' key from cfg["models"]["policy"] and cfg["models"]["value"]
@@ -242,19 +239,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
     except KeyError:
         pass
 
-    # obtain correct policy class based on skrl configs
+    # obtain correct policy class based on skrl configs - updated for 1.4.0
     policy = shared_model(
         observation_space=skrl_env.observation_space,
         action_space=skrl_env.action_space,
         device=skrl_env.device,
-        structure=None,
+        # structure=None, # to use default structure from 1.4.0 update
         roles=["policy", "value"],
         parameters=[
-            process_cfg(cfg["models"]["policy"]),
+            {
+                **process_cfg(cfg["models"]["policy"]),
+                "fixed_log_std": True,  # Make log_std fixed for ES
+                "initial_log_std": -4.6,  # ln(0.01) for your exploration_std
+            },
             process_cfg(cfg["models"]["value"]),
         ],
     )
 
+    # removing inplace randomness to make vmap happy
     apply_reparameterisation_patch(policy)
 
     # policy = BiggerMLP(
