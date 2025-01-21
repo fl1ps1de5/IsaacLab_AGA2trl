@@ -108,6 +108,7 @@ def reparameterised_act(self, inputs, role):
 
         # create a distribution for use with log_prob computation
         self._distribution = Normal(mean_actions, exploration_tensor)
+
         # instead of using a Normal distribution here we want to try with a triangular??
 
         # sample actions using fixed noise
@@ -130,7 +131,7 @@ def reparameterised_act(self, inputs, role):
         return actions, log_prob, outputs
 
     elif role == "value":
-        # we only include the value roll in our ES implementation as it is neccecary to intialize the Lazy layers of the policy
+        # we only include the value role in our ES implementation as it is neccecary to intialize the Lazy layers of the policy
         actions, outputs = self.compute(inputs, role)
         return actions, None, outputs
 
