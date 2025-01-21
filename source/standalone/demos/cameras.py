@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, The Isaac Lab Project Developers.
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -9,10 +9,10 @@ This script demonstrates the different camera sensors that can be attached to a 
 .. code-block:: bash
 
     # Usage
-    ./isaaclab.sh -p source/standalone/demos/cameras.py --disable_fabric
+    ./isaaclab.sh -p source/standalone/demos/cameras.py --enable_cameras
 
     # Usage in headless mode
-    ./isaaclab.sh -p source/standalone/demos/cameras.py --headless --enable_cameras --disable_fabric
+    ./isaaclab.sh -p source/standalone/demos/cameras.py --headless --enable_cameras
 
 """
 
@@ -187,7 +187,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             # if this is not done, then the robots will be spawned at the (0, 0, 0) of the simulation world
             root_state = scene["robot"].data.default_root_state.clone()
             root_state[:, :3] += scene.env_origins
-            scene["robot"].write_root_state_to_sim(root_state)
+            scene["robot"].write_root_link_pose_to_sim(root_state[:, :7])
+            scene["robot"].write_root_com_velocity_to_sim(root_state[:, 7:])
             # set joint positions with some noise
             joint_pos, joint_vel = (
                 scene["robot"].data.default_joint_pos.clone(),
@@ -274,16 +275,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
 
 def main():
     """Main function."""
-
-    # note: tile rendered cameras doesn't update the camera poses when using the GPU pipeline and Fabric.
-    #   this is a bug which should be fixed in the future releases.
-    sim_cfg = sim_utils.SimulationCfg(dt=0.005)
-    # check if fabric is enabled
-    if args_cli.disable_fabric:
-        sim_cfg.use_fabric = False
-        sim_cfg.device = "cpu"
-
     # Initialize the simulation context
+    sim_cfg = sim_utils.SimulationCfg(dt=0.005, device=args_cli.device, use_fabric=not args_cli.disable_fabric)
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
     sim.set_camera_view(eye=[3.5, 3.5, 3.5], target=[0.0, 0.0, 0.0])

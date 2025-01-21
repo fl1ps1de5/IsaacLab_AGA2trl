@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, The Isaac Lab Project Developers.
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -109,7 +109,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene_entities: dict):
         # Reset the scene
         if step_count % 250 == 0:
             # reset the balls
-            balls.write_root_state_to_sim(ball_default_state)
+            balls.write_root_link_pose_to_sim(ball_default_state[:, :7])
+            balls.write_root_com_velocity_to_sim(ball_default_state[:, 7:])
             # reset the sensor
             ray_caster.reset()
             # reset the counter
@@ -129,7 +130,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene_entities: dict):
 def main():
     """Main function."""
     # Load simulation context
-    sim_cfg = sim_utils.SimulationCfg()
+    sim_cfg = sim_utils.SimulationCfg(device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
     sim.set_camera_view([0.0, 15.0, 15.0], [0.0, 0.0, -2.5])
