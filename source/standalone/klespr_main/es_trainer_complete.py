@@ -360,7 +360,7 @@ class CompleteESTrainer(object):
         prior_actions_dist = Normal(prior_outputs["mean_actions"], prior_log_std.exp())
         current_actions_dist = Normal(current_outputs["mean_actions"], current_log_std.exp())
 
-        kl = kl_divergence(current_actions_dist, prior_actions_dist).mean(dim=1).squeeze(-1)
+        kl = kl_divergence(current_actions_dist, prior_actions_dist).mean(dim=1)
         print(f"Avg KL Divergence: {kl.mean().item()}")
         return kl
 

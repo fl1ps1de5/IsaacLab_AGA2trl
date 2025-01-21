@@ -76,6 +76,7 @@ import copy
 
 from skrl.utils.model_instantiators.torch import shared_model
 from skrl.envs.loaders.torch import load_isaaclab_env
+from skrl.envs.wrappers.torch import wrap_env
 from skrl.resources.preprocessors.torch.running_standard_scaler import RunningStandardScaler
 
 from omni.isaac.lab.envs import (
@@ -109,6 +110,7 @@ def reparameterised_act(self, inputs, role):
 
         # sample actions deterministically
         epsilon = torch.randn_like(mean_actions)
+        mean_actions = mean_actions.squeeze(0)
         actions = mean_actions
 
         # clip actions
@@ -122,6 +124,7 @@ def reparameterised_act(self, inputs, role):
         if log_prob.dim() != actions.dim():
             log_prob = log_prob.unsqueeze(-1)
 
+        mean_actions = mean_actions.squeeze(0)
         outputs["mean_actions"] = mean_actions
 
         return actions, log_prob, outputs
@@ -227,7 +230,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
     env = gym.make(args_cli.task, cfg=env_cfg, is_finite_horizon=False)
 
     # # wrap environemtn with skrl wrapper for use with shared_model
-    skrl_env = SkrlVecEnvWrapper(env, ml_framework=args_cli.ml_framework)
+    skrl_env = wrap_env(env, wrapper="isaaclab")
 
     # remove 'class' key from cfg["models"]["policy"] and cfg["models"]["value"]
     try:
@@ -254,6 +257,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
             },
             process_cfg(cfg["models"]["value"]),
         ],
+        single_forward_pass=False,
     )
 
     # removing inplace randomness to make vmap happy
