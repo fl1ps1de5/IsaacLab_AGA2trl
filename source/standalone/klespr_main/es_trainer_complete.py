@@ -210,6 +210,7 @@ class CompleteESTrainer(object):
 
             start_index = end_index
 
+        # investigation on 23/1 - added this due to meta / trainable parameters behaviours
         if "log_std_parameter" in self.policy.state_dict():
             real_log_std = self.policy.state_dict()["log_std_parameter"]  # e.g. shape [action_dim]
             # expand so each env / population index sees the same log_std
@@ -261,55 +262,6 @@ class CompleteESTrainer(object):
         else:
             actions = vmap(fmodel, in_dims=(0, 0), randomness="different")(params, inputs)
             return actions
-
-    @torch.no_grad()
-    def _generate_population(self) -> torch.Tensor:
-        """Generate a population of candidate parameters by applying noise to self.mu
-
-        Here we also implement trust regions in a novel way, by calculating the kl divergence
-        of the candidate population before evaluation and scaling it down when necessary.
-
-        self.pop_w has shape [npop, num_params] and is the population of candidate parameters
-
-        self.noise is the noise created for this generation
-        """
-        samples = torch.randn(self.npop // 2, self.num_params, device=self.device)
-
-        self.symmSamples = torch.zeros(self.npop, self.num_params, device=self.device)
-
-        # for i in range(self.npop // 2):
-        # idx = 2 * i
-        # self.symmSamples[idx] = samples[i]
-        # self.symmSamples[idx + 1] = -samples[i]
-
-        self.symmSamples[: self.npop // 2] = samples
-        self.symmSamples[self.npop // 2 :] = -samples
-
-        pop_w = self.mu.unsqueeze(0) + self.sigma * self.symmSamples
-
-        if self.hybrid and self.kl_threshold > 0:
-            # we are now  going to calculate kl divergence for each perturbation
-            # we will use this kl divergence to scale the perturbations
-            params = self._reshape_params(pop_w)
-            # now lets sample some states
-            states, _ = self.env.reset()
-            states = self.state_preprocessor(states)
-            # obtain current outputs
-            _, _, current_outputs = self._obtain_parallel_actions(states, params, self.model_arch, hybrid=self.hybrid)
-            # obtain outputs using previous policy
-            _, _, prior_outputs = self.prior_policy.act({"states": states}, role="policy")
-            # now
-            kl = self._calculate_kl_divergence(prior_outputs, current_outputs)
-            # scale perturbations based on KL
-            scaling_factors = torch.ones(self.npop, device=self.device)
-            mask = kl > self.kl_threshold
-            scaling_factors[mask] = self.kl_threshold / kl[mask]
-            # finally
-            scaled_perturbations = self.sigma * (self.symmSamples * scaling_factors.unsqueeze(1))
-            self.scaled_symmSamples = scaled_perturbations / self.sigma  # store for update later
-            pop_w = self.mu.unsqueeze(0) + scaled_perturbations
-
-        return pop_w
 
     @torch.no_grad()
     def _generate_population_fast(self) -> torch.Tensor:
@@ -431,36 +383,6 @@ class CompleteESTrainer(object):
             states = next_states
 
         return self.sum_rewards
-
-    @torch.no_grad()
-    def _compute_update_hybrid(self, fitness):
-
-        # rank the fitness scores in descending order (higher is better)
-        sorted_fitness, indices = torch.sort(fitness, descending=False)
-
-        # assign ranks (0 to npop - 1)
-        ranks = torch.zeros_like(fitness)
-        ranks[indices] = torch.arange(self.npop, device=self.device).type_as(fitness)
-
-        # compute utilities based on ranks
-        utilities = ranks
-        utilities /= self.npop - 1  # normalise ranks to [0, 1]
-        utilities -= 0.5  # Shift to [-0.5, 0.5]
-
-        # ensure utilities have zero mean
-        utilities -= utilities.mean()
-
-        # compute the parameter update using utilities instead of raw fitness
-        # ensure we use the scaled symmetric samples as this is what created the population
-        mu_change = (1.0 / (self.npop * self.sigma)) * torch.matmul(self.symmSamples.T, utilities)
-
-        globalg = -mu_change + 0.005 * self.mu
-
-        self.optimiser.stepsize = self.alpha
-        update_ratio = self.optimiser.update(globalg)
-
-        # decay sigma too
-        self.sigma = max(self.sigma * self.sigma_decay, self.sigma_limit)
 
     @torch.no_grad()
     def _compute_update_hybrid_fast(self, fitness):
