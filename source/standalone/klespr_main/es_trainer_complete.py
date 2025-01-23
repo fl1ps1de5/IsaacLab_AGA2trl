@@ -109,7 +109,7 @@ class CompleteESTrainer(object):
 
     def _recording_setup(self) -> None:
         """Sets up logging and writing functionality for trainer"""
-        endstring = "_hybrid_torch" if self.hybrid else "_es_torch"
+        endstring = "_hybrid_torch" if self.hybrid
         npop_shorthand = f"{str(self.npop)[0]}k"
         log_string = f"TT_{npop_shorthand}{SEED}_alpha_{self.alpha}_sigma_{self.sigma}_kl_{self.kl_threshold}_decay_{self.sigma_decay}"
 
@@ -264,7 +264,7 @@ class CompleteESTrainer(object):
             return actions
 
     @torch.no_grad()
-    def _generate_population_fast(self) -> torch.Tensor:
+    def _generate_population(self) -> torch.Tensor:
         """Generate population using CPU memory as buffer for large tensors"""
         # Generate samples on CPU
         samples = torch.randn(self.npop // 2, self.num_params, device="cpu")
@@ -320,43 +320,20 @@ class CompleteESTrainer(object):
     def _evaluate_population(self):
         """Generates and evaluates a population of parameter vectors by perturbing mu"""
         # Step 1: Generate population
-        pop_w = self._generate_population_fast()
+        pop_w = self._generate_population()
 
         # Step 2: Evaluate population
         total_rewards = torch.zeros(self.npop, device=self.device)
 
         for trial in range(self.cfg.get("ntrials", 1)):
-            if self.hybrid:
-                rewards = self._rollout_population_hybrid(pop_w)
-            else:
-                rewards, _ = self._rollout_population_es(pop_w)
+            rewards = self._rollout_population_hybrid(pop_w)
+
             total_rewards += rewards
 
         avg_rewards = total_rewards / self.cfg.get("ntrials", 1)
 
         # Step 3: return the average rewards over trials
         return avg_rewards
-
-    @torch.no_grad()
-    def _rollout_population_es(self, pop_w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Rollout the population through the environment and obtain summed rewards"""
-        all_dones = torch.zeros(self.npop, dtype=torch.bool, device=self.device)
-        sum_rewards = torch.zeros(self.npop, device=self.device)
-
-        states, _ = self.env.reset()
-        params = self._reshape_params(pop_w)
-
-        while not all_dones.all():
-            states = self.state_preprocessor(states, train=True)
-            actions = self._obtain_parallel_actions(states, params, self.model_arch, hybrid=False)
-            next_states, rewards, terminated, truncated, infos = self.env.step(actions)
-            self.current_timestep += 1
-            sum_rewards += rewards.squeeze()
-            dones = torch.bitwise_or(terminated, truncated)
-            all_dones = torch.bitwise_or(all_dones, dones.squeeze())
-            states = next_states
-
-        return sum_rewards, all_dones
 
     @torch.no_grad()
     def _rollout_population_hybrid(self, pop_w: torch.Tensor) -> torch.Tensor:
@@ -385,7 +362,7 @@ class CompleteESTrainer(object):
         return self.sum_rewards
 
     @torch.no_grad()
-    def _compute_update_hybrid_fast(self, fitness):
+    def _compute_update_hybrid(self, fitness):
 
         # rank the fitness scores in descending order (higher is better)
         sorted_fitness, indices = torch.sort(fitness, descending=False)
@@ -420,16 +397,6 @@ class CompleteESTrainer(object):
 
         del mu_change, globalg
         torch.cuda.empty_cache()
-
-    def _compute_update_es(self, fitness):
-        fitness = (fitness - fitness.mean()) / (fitness.std() + 1e-8)
-
-        mu_change = (1.0 / (self.npop * self.sigma)) * torch.matmul(self.symmSamples.T, fitness)
-
-        globalg = -mu_change
-
-        self.optimiser.stepsize = self.alpha
-        update_ratio = self.optimiser.update(globalg)
 
     def _update_tracking_data(self, rewards, gen):
 
@@ -522,9 +489,7 @@ class CompleteESTrainer(object):
             fitness = self._evaluate_population()
             # perform update
             if self.hybrid:
-                self._compute_update_hybrid_fast(fitness)
-            else:
-                self._compute_update_es(fitness)
+                self._compute_update_hybrid(fitness)
             # update training data
             self._update_tracking_data(rewards=fitness, gen=gen)
             # obtain mean reward from tracked data
