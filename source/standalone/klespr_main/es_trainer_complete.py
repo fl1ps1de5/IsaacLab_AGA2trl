@@ -109,9 +109,9 @@ class CompleteESTrainer(object):
 
     def _recording_setup(self) -> None:
         """Sets up logging and writing functionality for trainer"""
-        endstring = "_hybrid_torch" if self.hybrid
+        endstring = "_klespr_torch"
         npop_shorthand = f"{str(self.npop)[0]}k"
-        log_string = f"TT_{npop_shorthand}{SEED}_alpha_{self.alpha}_sigma_{self.sigma}_kl_{self.kl_threshold}_decay_{self.sigma_decay}"
+        log_string = f"{npop_shorthand}{SEED}_alpha_{self.alpha}_sigma_{self.sigma}_kl_{self.kl_threshold}_decay_{self.sigma_decay}"
 
         self.log_dir = os.path.join(self.cfg["logdir"], log_string + endstring)
         # initiate writer + save functionality
@@ -197,26 +197,22 @@ class CompleteESTrainer(object):
 
         for name, param in self.model_arch.named_parameters():
 
-            # only handle trainable parameters
-            if not param.requires_grad:
-                continue
-
             param_size = param.numel()
             new_shape = (self.npop,) + param.size()
             end_index = start_index + param_size
 
-            reshaped = pop_w[:, start_index:end_index].reshape(new_shape).to(self.device)
+            reshaped = pop_w[:, start_index:end_index].reshape(new_shape)
             params_dict[name] = reshaped
 
             start_index = end_index
 
-        # investigation on 23/1 - added this due to meta / trainable parameters behaviours
-        if "log_std_parameter" in self.policy.state_dict():
-            real_log_std = self.policy.state_dict()["log_std_parameter"]  # e.g. shape [action_dim]
-            # expand so each env / population index sees the same log_std
-            # shape => (self.npop, *real_log_std.shape)
-            expanded_log_std = real_log_std.unsqueeze(0).expand(self.npop, *real_log_std.shape).to(self.device)
-            params_dict["log_std_parameter"] = expanded_log_std
+        # # investigation on 23/1 - added this due to meta / trainable parameters behaviours
+        # if "log_std_parameter" in self.policy.state_dict():
+        #     real_log_std = self.policy.state_dict()["log_std_parameter"]  # e.g. shape [action_dim]
+        #     # expand so each env / population index sees the same log_std
+        #     # shape => (self.npop, *real_log_std.shape)
+        #     expanded_log_std = real_log_std.unsqueeze(0).expand(self.npop, *real_log_std.shape).to(self.device)
+        #     params_dict["log_std_parameter"] = expanded_log_std
 
         return params_dict
 
@@ -246,9 +242,9 @@ class CompleteESTrainer(object):
 
         def fmodel(params, inputs):
             if hybrid:
-                # return log_prob for KL divergence
-                actions, log_prob, outputs = functional_call(base_model, params, (inputs, "policy"))
-                return actions, log_prob, outputs
+                # return log_prob for KL divergence | no longer needed as KL calculated from log_std_param
+                actions, _, outputs = functional_call(base_model, params, (inputs, "policy"))
+                return actions, _, outputs
             else:
                 actions = functional_call(base_model, params, (inputs, "policy"))[0]
                 return actions
@@ -257,8 +253,8 @@ class CompleteESTrainer(object):
 
         # use vmap to obtain actions in parallel
         if hybrid:
-            actions, log_prob, outputs = vmap(fmodel, in_dims=(0, 0), randomness="different")(params, inputs)
-            return actions, log_prob, outputs
+            actions, _, outputs = vmap(fmodel, in_dims=(0, 0), randomness="different")(params, inputs)
+            return actions, _, outputs
         else:
             actions = vmap(fmodel, in_dims=(0, 0), randomness="different")(params, inputs)
             return actions

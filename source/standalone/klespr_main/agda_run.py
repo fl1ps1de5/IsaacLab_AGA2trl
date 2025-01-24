@@ -91,7 +91,7 @@ from es_trainer_complete import CompleteESTrainer
 from utils.config_loader import load_config, ConfigLoadError
 
 
-def reparameterised_act(self, inputs, role):
+def monkeypatched_act(self, inputs, role):
     if role == "policy":
         mean_actions, log_std, outputs = self.compute(inputs, role)
 
@@ -102,16 +102,16 @@ def reparameterised_act(self, inputs, role):
         self._log_std = log_std
         self._num_samples = mean_actions.shape[0]
 
-        # create a distribution for use with log_prob computation
-        std = log_std.exp()
-        self._distribution = Normal(mean_actions, std)
+        # distribution (used only for log_prob calculation)
+        self._distribution = Normal(mean_actions, log_std.exp())
 
-        # instead of using a Normal distribution here we want to try with a triangular??
-
-        # sample actions deterministically
+        # manually sample actions with fixed variance
         epsilon = torch.randn_like(mean_actions)
-        mean_actions = mean_actions.squeeze(0)
-        actions = mean_actions
+        fixed_std = 0.01
+        exploration_tensor = torch.zeros_like(log_std) + fixed_std
+
+        # "sample actions" from distribution with fixed variance
+        actions = mean_actions + epsilon * exploration_tensor
 
         # clip actions
         if self._clip_actions:
@@ -124,7 +124,6 @@ def reparameterised_act(self, inputs, role):
         if log_prob.dim() != actions.dim():
             log_prob = log_prob.unsqueeze(-1)
 
-        mean_actions = mean_actions.squeeze(0)
         outputs["mean_actions"] = mean_actions
 
         return actions, log_prob, outputs
@@ -140,13 +139,13 @@ def triangularDistribution():
     pass
 
 
-def apply_reparameterisation_patch(model):
+def apply_monkey_patch(model):
     if not hasattr(model, "_original_act"):
         model._original_act = model.act
-        model.act = partial(reparameterised_act, model)
+        model.act = partial(monkeypatched_act, model)
 
 
-def remove_reparameterisation_patch(model):
+def remove_monkey_patch(model):
     if hasattr(model, "_original_act"):
         model.act = model._original_act
         del model._original_act
@@ -250,30 +249,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
         # structure=None, # to use default structure from 1.4.0 update
         roles=["policy", "value"],
         parameters=[
-            {
-                **process_cfg(cfg["models"]["policy"]),
-                "fixed_log_std": True,  # Make log_std fixed for ES
-                "initial_log_std": -4.6,  # ln(0.01) for your exploration_std
-            },
+            process_cfg(cfg["models"]["policy"]),
             process_cfg(cfg["models"]["value"]),
         ],
         single_forward_pass=False,
     )
 
-    # removing inplace randomness to make vmap happy
-    apply_reparameterisation_patch(policy)
-
-    # policy = BiggerMLP(
-    #     observation_space=skrl_env.observation_space,
-    #     action_space=skrl_env.action_space,
-    #     device=skrl_env.device,
-    # )
-
-    # policy = SimpleMLP(
-    #     observation_space=skrl_env.observation_space,
-    #     action_space=skrl_env.action_space,
-    #     device=skrl_env.device,
-    # )
+    # removing inplace randomness to make vmap happy and adjust action sampling
+    apply_monkey_patch(policy)
 
     # determine custom trainer config
     task_name = args_cli.task.split("-")[1].lower()
@@ -311,8 +294,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
 
     # pass into trainer (note which trainer im using atm)
     trainer = CompleteESTrainer(cfg=trainer_config, env=skrl_env, policy=policy)
-    # trainer = ESTrainer(cfg=trainer_config, env=skrl_env, policy=policy)
-    # trainer = ESTrainerDated(cfg=trainer_config, env=skrl_env, policy=policy)
 
     # pre-experiment outputs
     print("\n" * 3, "========================" + "\n")
