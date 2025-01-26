@@ -6,8 +6,10 @@ ant:
     sigma_limit: 0.005
     alpha: 0.005
     checkpoint: null
+    klespr_ac_point: 4000
     antithetic: true
     state_preprocessor: RunningStandardScaler
     kl_threshold: 0.1
+    max_timesteps: 4000
 
     

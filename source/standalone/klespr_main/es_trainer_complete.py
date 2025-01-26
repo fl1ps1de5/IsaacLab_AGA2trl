@@ -57,6 +57,7 @@ class CompleteESTrainer(object):
         self.all_dones = torch.zeros(self.npop, dtype=torch.bool, device=self.device)
         # obtain testing / hybrid checkpoint
         self.checkpoint = self.cfg.get("checkpoint", None)
+        self.klespr_ac_point = self.cfg.get("klespr_ac_point", None)
         self.hybrid = self.cfg.get("hybrid", False)
         # tracking data
         self.tracking_data = {}
@@ -111,7 +112,7 @@ class CompleteESTrainer(object):
         """Sets up logging and writing functionality for trainer"""
         endstring = "_klespr_torch"
         npop_shorthand = f"{str(self.npop)[0]}k"
-        log_string = f"{npop_shorthand}{SEED}_alpha_{self.alpha}_sigma_{self.sigma}_kl_{self.kl_threshold}_decay_{self.sigma_decay}"
+        log_string = f"{npop_shorthand}{SEED}_sigma_{self.sigma}_decay_{self.sigma_decay}_alpha_{self.alpha}_kl_{self.kl_threshold}"
 
         self.log_dir = os.path.join(self.cfg["logdir"], log_string + endstring)
         # initiate writer + save functionality
@@ -193,10 +194,7 @@ class CompleteESTrainer(object):
         params_dict = {}
         start_index = 0
 
-        print("Original pop_w shape:", pop_w.shape)
-
         for name, param in self.model_arch.named_parameters():
-
             param_size = param.numel()
             new_shape = (self.npop,) + param.size()
             end_index = start_index + param_size
@@ -205,14 +203,6 @@ class CompleteESTrainer(object):
             params_dict[name] = reshaped
 
             start_index = end_index
-
-        # # investigation on 23/1 - added this due to meta / trainable parameters behaviours
-        # if "log_std_parameter" in self.policy.state_dict():
-        #     real_log_std = self.policy.state_dict()["log_std_parameter"]  # e.g. shape [action_dim]
-        #     # expand so each env / population index sees the same log_std
-        #     # shape => (self.npop, *real_log_std.shape)
-        #     expanded_log_std = real_log_std.unsqueeze(0).expand(self.npop, *real_log_std.shape).to(self.device)
-        #     params_dict["log_std_parameter"] = expanded_log_std
 
         return params_dict
 
@@ -310,7 +300,6 @@ class CompleteESTrainer(object):
         current_actions_dist = Normal(current_outputs["mean_actions"], current_log_std.exp())
 
         kl = kl_divergence(current_actions_dist, prior_actions_dist).mean(dim=1)
-        print(f"Avg KL Divergence: {kl.mean().item()}")
         return kl
 
     @torch.no_grad()
@@ -439,9 +428,11 @@ class CompleteESTrainer(object):
 
     def _write_to_tensorboard(self, step: float) -> None:
 
+        write_step = step + self.klespr_ac_point if self.hybrid else step
+
         for tag, value in self.tracking_data.items():
             if not tag.startswith("Window /"):
-                self.writer.add_scalar(tag, value, step)
+                self.writer.add_scalar(tag, value, write_step)
 
         self.writer.flush()
 

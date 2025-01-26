@@ -96,6 +96,10 @@ def monkeypatched_act(self, inputs, role):
     if role == "policy":
         mean_actions, log_std, outputs = self.compute(inputs, role)
 
+        # to allow for batched operations with vmap, must squeeze out extra dimension
+        if mean_actions.dim() > 1:
+            mean_actions = mean_actions.squeeze(0)
+
         # clamp log standard deviations
         if self._clip_log_std:
             log_std = torch.clamp(log_std, self._log_std_min, self._log_std_max)
@@ -260,9 +264,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
     apply_monkey_patch(policy)
 
     # play policy ?
-    PLAY = True
-    print(f"NOTE: PLAYGROUND MODE is set to {PLAY}")
+    PLAY = False
     if PLAY:
+        print(f"NOTE: PLAYGROUND MODE is set to {PLAY}")
         play_policy_shared(policy, skrl_env)
         env.close()
         simulation_app.close()
