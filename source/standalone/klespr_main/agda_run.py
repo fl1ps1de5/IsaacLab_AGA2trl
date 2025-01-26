@@ -75,7 +75,7 @@ from functools import partial
 import copy
 
 from skrl.utils.model_instantiators.torch import shared_model
-from skrl.envs.loaders.torch import load_isaaclab_env
+from skrl.envs.loaders.torch import load_isaaclab_env  # not using because confuses app laucnhing behaviour
 from skrl.envs.wrappers.torch import wrap_env
 from skrl.resources.preprocessors.torch.running_standard_scaler import RunningStandardScaler
 
@@ -84,10 +84,11 @@ from omni.isaac.lab.envs import (
 )
 
 import omni.isaac.lab_tasks  # noqa: F401
-from omni.isaac.lab_tasks.utils.wrappers.skrl import SkrlVecEnvWrapper
+from omni.isaac.lab_tasks.utils.wrappers.skrl import SkrlVecEnvWrapper  # not using because using skrl variant instead
 from omni.isaac.lab_tasks.utils.hydra import hydra_task_config
 
 from es_trainer_complete import CompleteESTrainer
+from utils.policyPlayground import play_policy_shared
 from utils.config_loader import load_config, ConfigLoadError
 
 
@@ -252,11 +253,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg, cfg: dict):
             process_cfg(cfg["models"]["policy"]),
             process_cfg(cfg["models"]["value"]),
         ],
-        single_forward_pass=False,
+        single_forward_pass=True,
     )
 
     # removing inplace randomness to make vmap happy and adjust action sampling
     apply_monkey_patch(policy)
+
+    # play policy ?
+    PLAY = True
+    print(f"NOTE: PLAYGROUND MODE is set to {PLAY}")
+    if PLAY:
+        play_policy_shared(policy, skrl_env)
+        env.close()
+        simulation_app.close()
+        sys.exit()
 
     # determine custom trainer config
     task_name = args_cli.task.split("-")[1].lower()

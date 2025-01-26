@@ -242,10 +242,11 @@ class CompleteESTrainer(object):
 
         def fmodel(params, inputs):
             if hybrid:
-                # return log_prob for KL divergence | no longer needed as KL calculated from log_std_param
+                # require outputs for hybrid in order to do KL calculations
                 actions, _, outputs = functional_call(base_model, params, (inputs, "policy"))
                 return actions, _, outputs
             else:
+                # note we only grab the actions if not hybrid ([0] index)
                 actions = functional_call(base_model, params, (inputs, "policy"))[0]
                 return actions
 
