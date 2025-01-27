@@ -75,7 +75,6 @@ from functools import partial
 import copy
 
 from skrl.utils.model_instantiators.torch import shared_model
-from skrl.envs.loaders.torch import load_isaaclab_env  # not using because confuses app laucnhing behaviour
 from skrl.envs.wrappers.torch import wrap_env
 from skrl.resources.preprocessors.torch.running_standard_scaler import RunningStandardScaler
 
@@ -84,7 +83,6 @@ from omni.isaac.lab.envs import (
 )
 
 import omni.isaac.lab_tasks  # noqa: F401
-from omni.isaac.lab_tasks.utils.wrappers.skrl import SkrlVecEnvWrapper  # not using because using skrl variant instead
 from omni.isaac.lab_tasks.utils.hydra import hydra_task_config
 
 from es_trainer_complete import CompleteESTrainer
@@ -191,27 +189,6 @@ def process_cfg(cfg: dict) -> dict:
         return d
 
     return update_dict(copy.deepcopy(cfg))
-
-
-# removed for 1.4.0 update
-# def initialise_lazy_linear(module, input_shape):
-#     for name, child in module.named_children():
-#         if isinstance(child, nn.LazyLinear):
-#             # forward a dummy input to initialize the lazy layer
-#             dummy_input = torch.zeros(1, *input_shape)
-#             child(dummy_input)
-#         elif isinstance(child, nn.Sequential):
-#             # if it's a sequential container, we need to update input_shape as we go
-#             for sub_module in child:
-#                 if isinstance(sub_module, nn.LazyLinear):
-#                     dummy_input = torch.zeros(1, *input_shape)
-#                     output = sub_module(dummy_input)
-#                     input_shape = output.shape[1:]
-#                 elif hasattr(sub_module, "in_features") and hasattr(sub_module, "out_features"):
-#                     input_shape = (sub_module.out_features,)
-#         else:
-#             # recursively initialise nested modules
-#             initialise_lazy_linear(child, input_shape)
 
 
 @hydra_task_config(args_cli.task, "skrl_cfg_entry_point")
