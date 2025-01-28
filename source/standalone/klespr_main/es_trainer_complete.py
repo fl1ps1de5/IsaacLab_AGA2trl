@@ -20,8 +20,6 @@ import os
 import time
 import collections
 
-SEED = 42
-
 
 class CompleteESTrainer(object):
     """
@@ -112,7 +110,8 @@ class CompleteESTrainer(object):
         """Sets up logging and writing functionality for trainer"""
         endstring = "_klespr_torch"
         npop_shorthand = f"{str(self.npop)[0]}k"
-        log_string = f"{npop_shorthand}{SEED}_sigma_{self.sigma}_decay_{self.sigma_decay}_alpha_{self.alpha}_kl_{self.kl_threshold}"
+        current_time = time.strftime("%Y-%m-%d_%H-%M-%S")
+        log_string = f"{self.env._env.cfg.seed}_{current_time}_klespr"
 
         self.log_dir = os.path.join(self.cfg["logdir"], log_string + endstring)
         # initiate writer + save functionality
@@ -126,7 +125,7 @@ class CompleteESTrainer(object):
 
         self.logger.log_setup(
             num_envs=self.npop,
-            env_seed=self.env.seed,
+            env_seed=self.env._env.cfg.seed,
             num_gens=self.num_gens,
             max_timesteps=self.max_timesteps,
             kl_threshold=self.kl_threshold,
@@ -138,7 +137,7 @@ class CompleteESTrainer(object):
             learning_rate_decay=self.alpha_decay,
             checkpoint=self.checkpoint,
             policy=self.policy,
-            optimiser=("Adam" if self.optimiser is not None else "None"),
+            num_params=self.num_params,
         )
 
     def _checkpoint_setup(self) -> None:
