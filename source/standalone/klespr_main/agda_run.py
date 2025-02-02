@@ -114,7 +114,8 @@ def monkeypatched_act(self, inputs, role):
         exploration_tensor = torch.zeros_like(log_std) + fixed_std
 
         # "sample actions" from distribution with fixed variance
-        actions = mean_actions + epsilon * exploration_tensor
+        # comment out exploration to create deterministic actions
+        actions = mean_actions  #  + epsilon * exploration_tensor
 
         # clip actions
         if self._clip_actions:

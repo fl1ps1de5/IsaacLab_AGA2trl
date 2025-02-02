@@ -111,7 +111,7 @@ class CompleteESTrainer(object):
         endstring = "_klespr_torch"
         npop_shorthand = f"{str(self.npop)[0]}k"
         current_time = time.strftime("%Y-%m-%d_%H-%M-%S")
-        log_string = f"{self.env._env.env.cfg.seed}_{current_time}_klespr_BKmethod1"
+        log_string = f"{self.env._env.env.cfg.seed}_{current_time}_klespr_BKdeterministic"
 
         self.log_dir = os.path.join(self.cfg["logdir"], log_string + endstring)
         # initiate writer + save functionality
