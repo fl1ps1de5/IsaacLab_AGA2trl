@@ -30,8 +30,11 @@ class KinovaReachEnvCfg(ReachEnvCfg):
         # switch robot to Kinova
         self.scene.robot = KINOVA_JACO2_N6S300_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
-        # initally do not override events
-        # self.events.reset_robot_joints.params["position_range"] = (0.75, 1.25)
+        # simple setup for debugging
+        # override scene to have one environment
+        self.scene.num_envs = 1
+        # override observations to disable corruption
+        self.observations.policy.enable_corruption = False
 
         # override rewards
         # note "gripper" not working so replacing with "j2n6s300_end_effector"
@@ -41,17 +44,13 @@ class KinovaReachEnvCfg(ReachEnvCfg):
         ]
         self.rewards.end_effector_orientation_tracking.params["asset_cfg"].body_names = ["j2n6s300_end_effector"]
 
-        # disable orientation tracking
-        self.rewards.end_effector_orientation_tracking.weight = 0.0
-
         # override actions
         self.actions.arm_action = mdp.JointPositionActionCfg(
             asset_name="robot", joint_names=["j2n6s300_joint_[1-6]"], scale=0.5, use_default_offset=True
         )
 
         # override command generator body
-        # end-effector is along ???-direction
-        # must be changed based on director of end effector
+        # must be changed based on director of end effector but currently assuming z axis like franka
         self.commands.ee_pose.body_name = "j2n6s300_end_effector"
         self.commands.ee_pose.ranges.pitch = (math.pi, math.pi)
 
