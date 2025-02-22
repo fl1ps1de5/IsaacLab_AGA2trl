@@ -10,6 +10,33 @@ def empty_preprocessor(input: Any, *args, **kwargs) -> Any:
     return input
 
 
+class TriangularTransform(torch.distributions.transforms.Transform):
+    domain = torch.distributions.transforms.constraints.interval(0.0, 1.0)
+    codomain = torch.distributions.transforms.constraints.interval(-1.0, 1.0)
+    sign = +1
+
+    def _call(self, x):
+        x = x.clamp(1e-6, 1 - 1e-6)  # clamping to prevent values without gradient
+        x = (1 - torch.abs(1 - 2 * x)).sqrt() * torch.sign(0.5 - x) + torch.sign(x - 0.5)
+        x[x.abs() < 3e-7] = 3e-7  # clamping to prevent values without gradient
+        return x
+
+    def _inverse(self, x):
+        return (1 - x.abs()).pow(2) / 2 * torch.sign(-x) + (1 + torch.sign(x)) / 2
+
+    def log_abs_det_jacobian(self, x, y):
+        x = x.clamp(1e-3, 1 - 1e-3)  # clamping to prevent values without gradient
+        dydx = 1 / (1 - torch.abs(1 - 2 * x)).sqrt()  # gradient computation
+        return dydx.log()
+
+
+def Triangular(loc, scale):  # Define the triangular distribution as a transformed dist.
+    return torch.distributions.transformed_distribution.TransformedDistribution(
+        torch.distributions.uniform.Uniform(torch.tensor(0.0), torch.tensor(1.0)),
+        [TriangularTransform(), torch.distributions.transforms.AffineTransform(loc=loc, scale=scale)],
+    )
+
+
 """ADD SOURCES AND LINKS TO THE BELOW"""
 
 

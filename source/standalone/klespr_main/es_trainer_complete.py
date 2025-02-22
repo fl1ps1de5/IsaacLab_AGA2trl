@@ -77,7 +77,8 @@ class CompleteESTrainer(object):
         # hybrid init
         else:
             self._checkpoint_setup()
-
+        # define method between TD, KLESPR, raw refinement
+        self.method = self.cfg.get("method", "klespr")
         # intiialise optimiser
         self.optimiser = Adam(self, stepsize=self.alpha)
         # setuping writer and logger
@@ -111,7 +112,15 @@ class CompleteESTrainer(object):
         endstring = "_klespr_torch"
         npop_shorthand = f"{str(self.npop)[0]}k"
         current_time = time.strftime("%Y-%m-%d_%H-%M-%S")
-        log_string = f"{self.env._env.env.cfg.seed}_{current_time}_klespr_BKmethod1"
+
+        if self.method == "td":
+            method_string = "_TDmethod1_smallerStd"
+        elif self.method == "raw":
+            method_string = "_PlainESrefinement"
+        elif self.method == "klespr":
+            method_string = "_BKmethod1"
+
+        log_string = f"{self.env._env.env.cfg.seed}_{current_time}_klespr{method_string}"
 
         self.log_dir = os.path.join(self.cfg["logdir"], log_string + endstring)
         # initiate writer + save functionality
@@ -251,7 +260,7 @@ class CompleteESTrainer(object):
 
     @torch.no_grad()
     def _generate_population(self) -> torch.Tensor:
-        """Generate population using CPU memory as buffer for large tensors"""
+        """Generate population using CPU memory as buffer for large tensors - uses KL to scale perturbations"""
         # Generate samples on CPU
         samples = torch.randn(self.npop // 2, self.num_params, device="cpu")
 
@@ -261,7 +270,7 @@ class CompleteESTrainer(object):
         self.symmSamples[self.npop // 2 :] = -samples
         del samples
 
-        # Move to GPU only for the computation
+        # Move to GPU only for the computationDo
         symmSamples_gpu = self.symmSamples.to(self.device)
         pop_w = self.mu.unsqueeze(0) + self.sigma * symmSamples_gpu
 
@@ -291,6 +300,60 @@ class CompleteESTrainer(object):
         return pop_w
 
     @torch.no_grad()
+    def _generate_population_triangular(self) -> torch.Tensor:
+        """Generate population using CPU memory as buffer for large tensors - samples noise from Triangular Dist"""
+
+        # create triangular distribution
+        triangular_dist = utils.Triangular(
+            loc=torch.tensor(0.0, device="cpu"),
+            scale=torch.tensor(self.sigma, device="cpu"),
+        )
+
+        # create samples from triangular distribution
+        samples = triangular_dist.sample((self.npop // 2, self.num_params))  # type: ignore
+
+        # some temporary code for plotting samples to verify distribution
+        want_to_plot_samples = False
+
+        if want_to_plot_samples:
+            save_path = f"logs/triangular_samples_gen_{self.current_generation}.pt"
+            torch.save(samples.cpu(), save_path)
+
+        # keep symmSamples on CPU until needed
+        self.symmSamples = torch.zeros(self.npop, self.num_params, device="cpu")
+        self.symmSamples[: self.npop // 2] = samples
+        self.symmSamples[self.npop // 2 :] = -samples
+        del samples
+
+        # move data to GPU only for the computation
+        # add samples to mu to create population of parameters
+        symmSamples_gpu = self.symmSamples.to(self.device)
+        pop_w = (
+            self.mu.unsqueeze(0) + symmSamples_gpu  # no need to scale by sigma here as its inherent in the distribution
+        )
+
+        return pop_w
+
+    @torch.no_grad()
+    def _generate_population_raw(self) -> torch.Tensor:
+        """Generate population using CPU memory as buffer for large tensors - samples noise like raw ES"""
+
+        # Generate samples on CPU
+        samples = torch.randn(self.npop // 2, self.num_params, device="cpu")
+
+        # Keep symmSamples on CPU until needed
+        self.symmSamples = torch.zeros(self.npop, self.num_params, device="cpu")
+        self.symmSamples[: self.npop // 2] = samples
+        self.symmSamples[self.npop // 2 :] = -samples
+        del samples
+
+        # Move to GPU only for the computation
+        symmSamples_gpu = self.symmSamples.to(self.device)
+        pop_w = self.mu.unsqueeze(0) + self.sigma * symmSamples_gpu
+
+        return pop_w
+
+    @torch.no_grad()
     def _calculate_kl_divergence(self, prior_outputs, current_outputs):
         prior_log_std = self.prior_policy.state_dict()["log_std_parameter"]
         current_log_std = self.policy.state_dict()["log_std_parameter"]
@@ -305,7 +368,15 @@ class CompleteESTrainer(object):
     def _evaluate_population(self):
         """Generates and evaluates a population of parameter vectors by perturbing mu"""
         # Step 1: Generate population
-        pop_w = self._generate_population()
+        if self.method == "td":
+            print("NOTE: USING TRIANGULAR DISTRIBUTION FOR SAMPLING")
+            pop_w = self._generate_population_triangular()
+        elif self.method == "raw":
+            print("NOTE: KLESPR DISABLED AND USING RAW ES FOR REFINEMENT")
+            pop_w = self._generate_population_raw()
+        elif self.method == "klespr":
+            print("NOTE: REGULAR KLESPR GENERATION")
+            pop_w = self._generate_population()
 
         # Step 2: Evaluate population
         total_rewards = torch.zeros(self.npop, device=self.device)
