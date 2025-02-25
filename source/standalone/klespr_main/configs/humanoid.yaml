@@ -1,0 +1,14 @@
+humanoid:
+  hybrid:
+    num_generations: 50
+    sigma: 0.025 # .0125 for TD, 0.025 for KLESPR
+    sigma_decay: 0.95
+    sigma_limit: 0.005
+    alpha: 0.005 # 0.0025 for TD, 0.005 for KLESPR
+    checkpoint: null
+    klespr_ac_point: 400
+    antithetic: true
+    state_preprocessor: RunningStandardScaler
+    kl_threshold: 0.1
+    max_timesteps: 10400
+    method: klespr
